@@ -1,0 +1,15 @@
+autogen-agentchat==0.7.5
+autogen-core==0.7.5
+autogen-ext==0.7.5
+openai>=1.99
+fastapi>=0.141
+uvicorn[standard]>=0.52
+websockets>=17
+mcp>=2.1
+jinja2>=3.1
+httpx>=0.28
+python-dotenv>=1.0
+tiktoken>=0.11
+reportlab>=4.0
+pillow>=10.0
+pytest>=8.0

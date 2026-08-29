@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TripMate · 多 Agent 协同旅游规划</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">✈️</div>
+      <div>
+        <div class="brand-name">TripMate</div>
+        <div class="brand-sub">多 Agent 协同旅游规划系统</div>
+      </div>
+    </div>
+
+    <div class="panel" id="profile-panel">
+      <div class="panel-title">🧳 旅行画像 <span class="ver" id="profile-ver">v0</span></div>
+      <div id="profile-body" class="profile-body">等待信息录入…</div>
+    </div>
+
+    <div class="panel" id="orders-panel" style="display:none">
+      <div class="panel-title">🧾 推荐订单清单 <span class="chip chip-ok" id="orders-total"></span></div>
+      <div id="orders-body"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">📊 Token 消耗</div>
+      <div class="usage-bar"><div class="usage-fill" id="usage-fill"></div></div>
+      <div class="usage-text" id="usage-text">0 / 200K</div>
+    </div>
+  </aside>
+
+  <main class="chat-col">
+    <header class="chat-head">
+      <div class="agents-row">
+        <span class="agent-chip" data-agent="Chatter">💬 Chatter 聊天管家</span>
+        <span class="agent-chip" data-agent="InformationProcessor">🗂 信息处理</span>
+        <span class="agent-chip" data-agent="Researcher">🔍 信息收集</span>
+        <span class="agent-chip" data-agent="BookingButler">🎫 MCP 专项</span>
+        <span class="agent-chip" data-agent="Planner">🗺 计划规划</span>
+      </div>
+      <div class="head-right">
+        <button id="stop-plan" title="停止当前规划任务（已收集数据保留）">⏹ 停止规划</button>
+        <div class="conn-dot" id="conn-dot"></div>
+      </div>
+    </header>
+
+    <div class="chat-scroll" id="chat">
+      <div class="msg sys">
+        你好！我是 TripMate 的聊天管家。告诉我<strong>出发地、目的地、天数</strong>，
+        以及预算、出行方式、酒店偏好、必去景点等（可选），我来为你规划行程。
+        <br>例如：<em>「帮我规划十一成都 3 天游，10 月 1 号从上海出发，高铁往返，两个人，预算 6000 最多 7000，
+        想休闲一点顺便吃吃喝喝，酒店想住春熙路附近 300 到 500 一晚的，必去大熊猫基地。」</em>
+      </div>
+    </div>
+    <div class="composer">
+      <textarea id="input" rows="2" placeholder="输入消息，Enter 发送（Shift+Enter 换行）…"></textarea>
+      <button id="send">发送</button>
+    </div>
+  </main>
+
+  <aside class="timeline-col">
+    <div class="panel-title">🛰 Agent 工作状态</div>
+    <div class="timeline" id="timeline"></div>
+  </aside>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

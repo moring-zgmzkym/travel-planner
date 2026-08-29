@@ -1,0 +1,30 @@
+<div class="draft-card">
+  <div class="draft-head">
+    <span class="draft-title">📋 行程草稿 · {{ basic.days }} 天（{{ basic.origin }} → {{ basic.destination }}）</span>
+    {% if detail.must_visit %}<span class="chip">必去：{{ detail.must_visit | join("、") }}</span>{% endif %}
+    <span class="chip">节奏：{{ detail.pace or "中" }}</span>
+  </div>
+  <table class="draft-table">
+    <thead><tr><th>日期</th><th>上午</th><th>下午</th><th>晚上</th><th>景点</th></tr></thead>
+    <tbody>
+    {% for day in draft.days %}
+      <tr>
+        <td class="day-cell">D{{ loop.index }}<br><small>{{ day.date }}</small></td>
+        <td>{{ day.morning }}</td><td>{{ day.afternoon }}</td><td>{{ day.evening }}</td>
+        <td class="spots-cell">{% for s in day.spots %}<span class="spot">{{ s }}</span> {% endfor %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <table class="budget-table">
+    <thead><tr><th>预算项</th><th>说明</th><th>金额（元）</th></tr></thead>
+    <tbody>
+      {% for it in budget['items'] %}<tr><td>{{ it.item }}</td><td>{{ it.note }}</td><td>{{ it.amount }}</td></tr>{% endfor %}
+      <tr class="total-row"><td>合计</td>
+        <td>预算 {{ budget.budget or "—" }}｜上限 {{ budget.budget_max or "—" }}{% if budget.occupancy %}｜占用 {{ "%.0f" | format(budget.occupancy * 100) }}%{% endif %}</td>
+        <td>{{ budget.total }}</td></tr>
+    </tbody>
+  </table>
+  {% for w in budget.warnings %}<div class="budget-warn">⚠ {{ w }}</div>{% endfor %}
+  <div class="draft-tip">可直接在聊天框输入修改意见（如「第 2 天换成都江堰」），或回复「确认」进入定稿。</div>
+</div>
