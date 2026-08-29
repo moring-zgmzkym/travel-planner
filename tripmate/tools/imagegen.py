@@ -46,8 +46,13 @@ def generate_placeholder(spot: str) -> str:
             (int(c2[0] * 255), int(c2[1] * 255), int(c2[2] * 255))))
         d.line([(0, y), (_SIZE[0], y)], fill=color)
 
-    f_big = _font(64)
     f_small = _font(28)
+    # 标题自适应字号：超长景点名（如分隔失败把整串清单当一名）缩字号至卡片宽度内，避免左右裁切
+    size = 64
+    f_big = _font(size)
+    while f_big and d.textlength(spot, font=f_big) > _SIZE[0] * 0.88 and size > 24:
+        size -= 4
+        f_big = _font(size)
     if f_big:
         w = d.textlength(spot, font=f_big)
         d.text(((_SIZE[0] - w) / 2, 190), spot, fill="white", font=f_big)

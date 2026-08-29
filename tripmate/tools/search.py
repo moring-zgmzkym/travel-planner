@@ -46,9 +46,9 @@ def _degraded_notice() -> str:
 async def search_guides(destination: str, month_hint: str = "") -> dict:
     """多类查询（§4.3）：小红书/马蜂窝 site: 限定 + 百度常规，每类 top5 去重合并。"""
     queries = [
-        (f"{destination} 攻略 site:xiaohongshu.com", "小红书"),
-        (f"{destination} 旅游攻略 site:mafengwo.cn", "马蜂窝"),
-        (f"{destination} 旅游攻略 {month_hint}".strip(), "百度"),
+        (f"{destination} 攻略 site:xiaohongshu.com", "小红书检索"),
+        (f"{destination} 旅游攻略 site:mafengwo.cn", "马蜂窝检索"),
+        (f"{destination} 旅游攻略 {month_hint}".strip(), "全网检索"),
     ]
     if SearchConfig.TAVILY_API_KEY:
         try:

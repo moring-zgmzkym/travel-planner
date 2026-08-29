@@ -101,3 +101,24 @@ def test_hotel_scoring_pref_range():
     ]
     ranked = score_and_select(cands, [300, 500])
     assert ranked[0]["name"] == "H1" and ranked[0]["selected"] is True
+
+
+def test_compute_budget_max_only_warning():
+    # 只填"最大预算"：超支预警必须生效（修复前 budget=0 时永不触发），occupancy 按上限计算
+    bb = _profile_bb()
+    bb.profile.basic_info.budget = None
+    bb.profile.basic_info.budget_max = 3500
+    b = compute_budget(bb.profile, _draft())
+    assert any("超出最大预算" in w for w in b["warnings"])
+    assert b["budget_max"] == 3500 and b["occupancy"] is not None and b["budget"] == 0
+
+
+def test_compute_budget_only_90pct_warning():
+    # 只填预算：budget_max 自动 ×1.2，超 90% 触发预警但未破上限
+    bb = _profile_bb()
+    bb.profile.basic_info.budget = 5500
+    bb.profile.basic_info.budget_max = None
+    b = compute_budget(bb.profile, _draft())
+    assert b["budget_max"] == 6600.0
+    assert any(">90%" in w for w in b["warnings"])
+    assert not any("超出最大预算" in w for w in b["warnings"])

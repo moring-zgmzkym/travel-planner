@@ -27,6 +27,9 @@ DEFAULTS: dict[str, tuple[object, str]] = {
     "party_size": (1, "同行人数默认 1 人"),
 }
 
+# 区域型目的地 → 代表性核心城市（仅精确匹配整词；宽泛词如"陕西"不自动替换，避免误判）
+REGION_ALIAS: dict[str, str] = {"陕南": "汉中", "陕西南部": "汉中", "陕南地区": "汉中"}
+
 
 async def ensure_travel_dates(bb: Blackboard, bus: StatusBus) -> bool:
     """启动前兜底（问题 4）：出行时间段缺失时确定性写入默认"近期"并在草稿标注。
@@ -81,6 +84,16 @@ def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> Assista
                         basic_updates["travel_dates"] = expand_dates(dates[0], days)
             except ValueError:
                 pass  # 非法日期格式交给后续流程容错
+
+        # 区域型目的地解析（仅精确匹配 REGION_ALIAS 整词）：代表城市入 destination，区域表述留 special_needs
+        dest = basic_updates.get("destination")
+        if dest in REGION_ALIAS:
+            resolved = REGION_ALIAS[dest]
+            basic_updates["destination"] = resolved
+            basic_updates["defaults_applied"] = list(bb.profile.basic_info.defaults_applied) \
+                + [f"destination 按区域解析：{dest}→{resolved}"]
+            await bus.emit("Chatter", f"目的地「{dest}」按区域解析为代表城市「{resolved}」（可随时在对话中修改）",
+                           "STATUS_INFO")
 
         if basic_updates:
             await bb.apply_basic_info(basic_updates, "chatter", "用户输入抽取")
@@ -191,7 +204,7 @@ def _profile_view(bb: Blackboard) -> str:
     return json.dumps(view, ensure_ascii=False)
 
 
-_TOOL_MARKUP = re.compile(r"<[/]?tool_calls?[^>]*>|<[/]?arg_value[^>]*>|<[/]?args[^>]*>", re.IGNORECASE)
+_TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args)[^>]*>", re.IGNORECASE)
 _TOOL_BLOCK = re.compile(r"<tool_calls?:[^>]*>.*?</tool_calls?>", re.IGNORECASE | re.DOTALL)
 
 

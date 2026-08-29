@@ -101,7 +101,7 @@ def compute_budget(profile: TravelProfile, draft: Draft | None) -> dict[str, Any
     budget = basic.budget or 0
     budget_max = basic.budget_max or (budget * 1.2 if budget else 0)
     warnings: list[str] = []
-    if budget and total > budget_max:
+    if budget_max and total > budget_max:
         warnings.append(f"总预算 {total} 元已超出最大预算 {budget_max} 元，建议压缩：优先下调住宿标准/减少收费景点")
     elif budget and total > budget * 0.9:
         warnings.append(f"总预算 {total} 元已占用预算 {budget} 元的 {total / budget:.0%}（>90% 预警）")
@@ -116,7 +116,7 @@ def compute_budget(profile: TravelProfile, draft: Draft | None) -> dict[str, Any
     return {
         "items": items, "spot_items": spot_items, "total": total,
         "budget": budget, "budget_max": budget_max,
-        "occupancy": round(total / budget, 3) if budget else None,
+        "occupancy": round(total / (budget or budget_max), 3) if (budget or budget_max) else None,
         "warnings": warnings,
     }
 

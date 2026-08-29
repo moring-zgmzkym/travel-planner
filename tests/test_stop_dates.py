@@ -47,7 +47,11 @@ def test_researcher_tools_merged():
     assert names == {"start_guide_search", "finish_guide_search", "search_spot_images"}
 
 
-def test_finish_guide_search_writes_and_advances():
+def test_finish_guide_search_writes_and_advances(monkeypatch):
+    # 单测钉在 mock 通道：不依赖 .env 是否配置 TAVILY_API_KEY，也不消耗真实搜索额度
+    from tripmate.tools import search as search_mod
+    monkeypatch.setattr(search_mod.SearchConfig, "TAVILY_API_KEY", "")
+
     async def main():
         bb = Blackboard()
         bb.profile.basic_info = BasicInfo(origin="上海", destination="成都", days=3,

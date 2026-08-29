@@ -220,8 +220,10 @@ def make_researcher_tools(ctx: TeamContext):
         """搜索景点配图（每景点 1-2 张，附来源），写入共享黑板 images 分区。
         spots：逗号分隔的景点名清单；留空则自动取当前草稿的全部景点。"""
         prof: TravelProfile = ctx.bb.profile
-        names = [s.strip() for s in spots.split("，") if s.strip()]
-        names = names or [s.strip() for s in spots.split(",") if s.strip()]
+        # 模型可能用中英文逗号/顿号/分号/换行任一分隔景点 → 统一归一后再切分
+        for sep in ("，", "、", "；", ";", "\n"):
+            spots = spots.replace(sep, ",")
+        names = [s.strip() for s in spots.split(",") if s.strip()]
         if not names and prof.draft:
             names = sorted({s for d in prof.draft.days for s in d.spots})
         names = [n for n in names if n][:8]
@@ -719,6 +721,22 @@ class TeamRunner:
                                     "STATUS_DRAFT")
                 AUDIT.observation("TeamRunner", "guardrail 恢复 draft"
                                   + ("（从文本化调用参数）" if recovered else "（确定性兜底）"))
+            # 草稿可能先于票务/酒店分区生成（LLM 协议时序不保证）→ 预算按当前已勾选订单重算；
+            # 等额不写（幂等，避免版本号扰动）；写入者 planner，不进 user_changes_since 检查点统计
+            if self.bb.profile.draft:
+                draft = self.bb.profile.draft
+                budget = compute_budget(self.bb.profile, draft)
+                if abs(budget["total"] - draft.budget_total) > 0.01:
+                    draft.budget_items = budget["items"]
+                    draft.budget_total = budget["total"]
+                    draft.warnings = budget["warnings"]
+                    draft.notes = [n for n in (draft.notes or []) if not n.startswith("预算占用")]
+                    if budget["occupancy"]:
+                        draft.notes = draft.notes + [f"预算占用 {budget['occupancy']:.0%}"]
+                    await self.bb.write("draft", draft, "planner", "护栏重算：草稿预算按已勾选订单更新")
+                    await self.bus.emit("TeamRunner", f"护栏：草稿预算已按勾选订单重算（{draft.budget_total} 元）",
+                                        "STATUS_CHECKPOINT")
+                    AUDIT.observation("TeamRunner", f"guardrail 重算 draft 预算 → {draft.budget_total} 元")
         elif phase == "finalize":
             if not self.bb.profile.images and self.bb.profile.draft:
                 spots = sorted({s for d in self.bb.profile.draft.days for s in d.spots})
@@ -877,7 +895,7 @@ class TeamRunner:
                     f"\n（这是第 {self._draft_rounds} 轮修改，共上限 {BudgetConfig.MAX_DRAFT_ROUNDS} 轮）"
                     "\n请计划规划 Agent 按反馈修订行程并重新调用 submit_draft。")
         return "DRAFT_CONFIRMED 用户已确认草稿。请计划规划 Agent 调用 request_images 发起图片请求，" \
-               "待 IMAGE_RESULT 后调用 generate_pdf 完成定稿。"
+               "待 IMAGE_RESULT 后调用 deliver_final 完成定稿。"
 
     async def _stream_team(self, team: SelectorGroupChat, task_text: str) -> tuple[str, list[str]]:
         """事件流采集：Thought/Action/Observation → 审计日志（验收 #16）；Agent 最终消息 → 用户时间线。

@@ -66,6 +66,9 @@ class GuideDigestItem(BaseModel):
     foods: list[str] = Field(default_factory=list)
     routes: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    raw_answer: str = ""          # 真实通道原始搜索摘要（mock 通道为空）
+    raw_titles: list[str] = Field(default_factory=list)  # 真实通道搜索结果标题
+    raw_urls: list[str] = Field(default_factory=list)
     reference_only: bool = False  # True = 模拟/摘要级参考数据（降级通道）
 
 

@@ -82,15 +82,16 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
     for t in profile.tickets:
         order_rows.append(["车票", t.train_no,
                            f"{t.depart_time} 出发 / {t.arrive_time} 到达，{t.price} 元",
-                           ("✅ 已勾选：" if t.selected else "") + t.reason or "",
+                           ("√ 已勾选：" if t.selected else "") + t.reason or "",
                            t.link or "—"])
     for h in profile.hotels:
         order_rows.append(["酒店", h.name,
                            f"{h.price_per_night} 元/晚，距地标 {h.distance_km}km，评分 {h.rating}",
-                           ("✅ 已勾选：" if h.selected else "") + (h.reason or ""),
+                           ("√ 已勾选：" if h.selected else "") + (h.reason or ""),
                            h.link or "—"])
     story.append(_table(order_rows, [14 * mm, 30 * mm, 52 * mm, 52 * mm, 28 * mm], font_size=8))
-    total_order = sum(t.price * (2 if "往返" not in t.train_no else 1) * (detail.party_size or 1)
+    party = detail.party_size or basic.party_size or 1
+    total_order = sum(t.price * (2 if "往返" not in t.train_no else 1) * party
                       for t in profile.tickets if t.selected)
     total_order += sum(h.price_per_night * max((basic.days or 1) - 1, 0)
                        for h in profile.hotels if h.selected)
@@ -98,7 +99,7 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
                            _style("order_total", 10, spaceBefore=3, spaceAfter=6)))
     ref_notes = [x.source for x in (*profile.tickets, *profile.hotels) if x.reference_only]
     if ref_notes:
-        story.append(Paragraph("⚠ 数据来源说明：" + "；".join(sorted(set(ref_notes))),
+        story.append(Paragraph("※ 数据来源说明：" + "；".join(sorted(set(ref_notes))),
                                _style("refnote", 8.5, color=WARN, spaceAfter=6)))
 
     # ---- 逐日行程表 ----
@@ -137,7 +138,7 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
                   f"{budget['total']}"])
     story.append(_table(b_rows, [24 * mm, 106 * mm, 40 * mm]))
     for w in budget["warnings"]:
-        story.append(Paragraph("⚠ " + w, _style("bwarn", 9.5, color=WARN, spaceBefore=2)))
+        story.append(Paragraph("※ " + w, _style("bwarn", 9.5, color=WARN, spaceBefore=2)))
 
     # ---- 实拍配图 ----
     if profile.images:
@@ -162,7 +163,16 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
         foods += g.foods
     seen_f: set[str] = set()
     uniq_foods = [f for f in foods if not (f in seen_f or seen_f.add(f))]
-    story.append(Paragraph("、".join(uniq_foods[:12]) or "暂无（攻略通道未返回）", _style("foods", 10)))
+    foods_text = "、".join(uniq_foods[:12])
+    if not foods_text:
+        # 真实搜索通道结构化字段为空时，回退展示标题含目的地的搜索结果（诚实标注，纯展示，
+        # 过滤 Tavily 对 site: 限定遵守不严带来的无关结果）
+        dest = basic.destination or ""
+        titles = [t for g in profile.guide_digest for t in g.raw_titles if t and dest and dest in t]
+        titles = list(dict.fromkeys(titles))[:5]
+        foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
+            else "暂无（攻略通道未返回）"
+    story.append(Paragraph(foods_text, _style("foods", 10)))
 
     story.append(Paragraph("六、注意事项与数据来源", _style("h1", 14, color=PRIMARY, spaceAfter=4, spaceBefore=6)))
     warns: list[str] = []
