@@ -159,8 +159,9 @@ def make_researcher_tools(ctx: TeamContext):
         prof: TravelProfile = ctx.bb.profile
         dest = prof.basic_info.destination or ""
         month = prof.basic_info.date_text or ""
-        await ctx.bus.emit(AGENT_RES, f"攻略搜索中…（{dest}｜小红书 / 马蜂窝 / 百度 三路并行）", "STATUS_COLLECT")
-        r = await search_guides(dest, month)
+        style = " ".join(prof.basic_info.style or [])
+        await ctx.bus.emit(AGENT_RES, f"攻略搜索中…（{dest}｜7 路专题并行：站点/美食/避坑/路线/景点）", "STATUS_COLLECT")
+        r = await search_guides(dest, month, style_hint=style)
         tag = "降级参考值" if r["mode"] == "mock" else "实时"
         await ctx.bus.emit(AGENT_RES, f"攻略搜索完成：{len(r['digest'])} 份来源（{tag}）", "STATUS_COLLECT")
         return r
@@ -230,7 +231,7 @@ def make_researcher_tools(ctx: TeamContext):
         if not names:
             return _ok(status="error", error="没有可搜索的景点清单（spots 参数为空且黑板无草稿）")
         await ctx.bus.emit(AGENT_RES, f"景点配图搜索中…（{len(names)} 个景点）", "STATUS_IMAGES")
-        r = await search_images(names)
+        r = await search_images(names, city=prof.basic_info.destination or "")
         items = [ImageItem(spot=i["spot"], path=i.get("path", ""), source=i["source"], note=r.get("notice", ""))
                  for i in r["items"]]
         await ctx.bb.write("images", items, "researcher", "景点配图（" + r["mode"] + "）")
@@ -333,6 +334,14 @@ def make_booking_tools(ctx: TeamContext):
             hr = await ctx.jobs.collect("hotels")
             hotels = [HotelCandidate(**h) for h in score_hotels(hr["candidates"], detail.hotel.price_range)]
             await ctx.bb.write("hotels", hotels, "booking", "酒店候选与勾选" + ("（降级参考值）" if hr["mode"] == "mock" else "（MCP 实时）"))
+            # 需求 6：勾选酒店补充宣传图与住客评价摘要（失败留空，不影响主流程）
+            try:
+                from .tools.hotels import enrich_hotels
+                await enrich_hotels(hotels, basic.destination or "")
+                if any(h.image_path or h.review_digest for h in hotels):
+                    await ctx.bb.write("hotels", hotels, "booking", "酒店宣传图与评价摘要补充")
+            except Exception as exc:  # noqa: BLE001 — 增强失败只记审计
+                AUDIT.observation("BookingButler", f"酒店信息补充失败（不影响主流程）：{exc}")
             if hr.get("notice"):
                 reuse_notes.append(hr["notice"])
         else:
@@ -503,6 +512,7 @@ class TeamRunner:
         self._base_version = 0               # 检查点基准版本
         self._rerun_budget = 2               # 检查点触发增量重跑的次数上限
         self.active = False                  # 规划态标志（闲置态 = False，验收 #2）
+        self._last_destination = ""          # 上一轮目的地（新一轮规划时清空数据分区的判据）
 
     # ---- §3.3 Tool 入参/出参契约 ----
     def start(self, task: str = "plan_trip", options: dict | None = None) -> dict:
@@ -514,6 +524,16 @@ class TeamRunner:
         if self.active and self._task and not self._task.done():
             return {"status": "rejected", "reason": "团队正在运行中，请等待当前阶段完成"}
         self.run_id = uuid.uuid4().hex
+        # 新一轮规划边界：清空上一轮 run 作用域残留（§4.5 闭环后再次规划的场景）。
+        # 成品/草稿必清（否则 has_draft 恒 true 会把新请求拖进草稿反馈语义）；
+        # 目的地变化时数据分区连带清，防止旧行程的车票/酒店/攻略混入新订单与预算——护栏会按新行程重新补齐。
+        # 清空必须在 _base_version 采集之前（增量重跑/终止判定以清空后的黑板为基准）。
+        dest = prof.basic_info.destination or ""
+        clear: dict[str, Any] = {"draft": None, "draft_feedback": None, "final": None, "plan_input": None}
+        if dest != self._last_destination:
+            clear.update({"tickets": [], "hotels": [], "guide_digest": [], "weather": {}, "images": []})
+        self._last_destination = dest
+        self.bb.clear_sections(clear, "system", f"新一轮规划（{dest or '目的地待定'}）：清空上一轮残留")
         self._draft_rounds = 0
         self._rerun_budget = 2
         self._base_version = self.bb.version()
@@ -741,7 +761,7 @@ class TeamRunner:
         elif phase == "finalize":
             if not self.bb.profile.images and self.bb.profile.draft:
                 spots = sorted({s for d in self.bb.profile.draft.days for s in d.spots})
-                r = await search_images(spots)
+                r = await search_images(spots, city=self.bb.profile.basic_info.destination or "")
                 items = [ImageItem(spot=i["spot"], path=i.get("path", ""), source=i["source"], note=r.get("notice", ""))
                          for i in r["items"]]
                 await self.bb.write("images", items, "researcher", "护栏补齐：图片分区缺失")

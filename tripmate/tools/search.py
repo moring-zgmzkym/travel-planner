@@ -17,7 +17,7 @@ import httpx
 
 from ..config import SearchConfig
 from ..mocks.data import mock_guide_digest
-from .resilience import ServiceUnavailable, with_retry
+from .resilience import with_retry
 
 logger = logging.getLogger("tripmate.tools.search")
 
@@ -28,9 +28,15 @@ _IMG_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWe
                               "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
 _IMG_TIMEOUT_S = 10.0
 _PLACEHOLDER_SOURCE = "本地示意配图（模拟数据模式，非实景）"
+# 已知水印图库（实拍图几乎必带水印/编号，混入 PDF 观感差，2026-08-30 汉中实测）：检索阶段直接跳过
+_WATERMARK_HOSTS = ("huitu.com", "vcg.com", "nipic.com", "58pic.com", "dfic.cn", "sipaphoto.com")
+# 优先图源：权威媒体/官方/百科（实景相关性与画质实测更稳，2026-08-30：光明网/中国日报/界面/西部网等）
+_PREFERRED_HOSTS = ("chinadaily.com", "gmw.cn", "jiemian.com", "people.com.cn", "xinhuanet.com",
+                    "cctv.com", "cnwest.com", "gov.cn", "wikimedia.org", "wikipedia.org",
+                    "thepaper.cn", "chinanews.com", "ce.cn", "china.com.cn")
 
 
-async def _tavily(query: str, search_depth: str = "basic") -> dict:
+async def _tavily(query: str, search_depth: str = "basic", max_results: int = 5) -> dict:
     async def _call() -> dict:
         async with httpx.AsyncClient(timeout=SearchConfig.TIMEOUT_S) as client:
             r = await client.post(
@@ -39,7 +45,7 @@ async def _tavily(query: str, search_depth: str = "basic") -> dict:
                     "api_key": SearchConfig.TAVILY_API_KEY,
                     "query": query,
                     "search_depth": search_depth,
-                    "max_results": 5,
+                    "max_results": max_results,
                     "include_answer": True,
                 },
             )
@@ -54,41 +60,55 @@ def _degraded_notice() -> str:
     return "搜索引擎通道暂不可用（未配置 Key 或调用失败），以下为降级参考数据（§7 降级方案）"
 
 
-async def search_guides(destination: str, month_hint: str = "") -> dict:
-    """多类查询（§4.3）：小红书/马蜂窝 site: 限定 + 百度常规，每类 top5 去重合并。"""
-    queries = [
-        (f"{destination} 攻略 site:xiaohongshu.com", "小红书检索"),
-        (f"{destination} 旅游攻略 site:mafengwo.cn", "马蜂窝检索"),
-        (f"{destination} 旅游攻略 {month_hint}".strip(), "全网检索"),
+def _guide_queries(destination: str, month_hint: str = "", style_hint: str = "") -> list[tuple[str, str]]:
+    """攻略检索查询构造（纯函数，便于单测）：站点 3 路 + 主题 4 路。"""
+    dest = destination or ""
+    topic = f"{dest} {style_hint}".strip() if style_hint else dest
+    return [
+        (f"{dest} 攻略 site:xiaohongshu.com", "小红书检索"),
+        (f"{dest} 旅游攻略 site:mafengwo.cn", "马蜂窝检索"),
+        (f"{dest} 旅游攻略 {month_hint}".strip(), "全网检索"),
+        (f"{dest} 美食攻略 必吃", "美食专题"),
+        (f"{dest} 旅游 避坑 注意事项", "避坑专题"),
+        (f"{dest} 行程路线 动线 {month_hint}".strip(), "路线专题"),
+        (f"{topic} 必去景点 推荐", "景点专题"),
     ]
+
+
+async def search_guides(destination: str, month_hint: str = "", style_hint: str = "") -> dict:
+    """多类查询（§4.3）：站点限定 + 主题专题共 7 路并行（2026-08-30 扩容：攻略信息量不足以
+    支撑贴合用户需求的行程，增加美食/避坑/路线/景点专题路），每路 top8 去重合并。"""
+    queries = _guide_queries(destination or "", month_hint, style_hint)
     if SearchConfig.TAVILY_API_KEY:
-        try:
-            results = await asyncio.gather(*[_tavily(q) for q, _ in queries], return_exceptions=True)
-            digest = []
-            for (query, name), res in zip(queries, results):
-                if isinstance(res, Exception):
-                    continue  # 单来源失败标记暂缺并继续（§4.3）
-                answer = res.get("answer", "")
-                tops = res.get("results", [])[:5]
-                digest.append({
-                    "source_name": f"{name}（Tavily 搜索摘要级）",
-                    "source_url": tops[0]["url"] if tops else "",
-                    "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "raw_answer": answer[:2000],
-                    "raw_titles": [t.get("title", "")[:120] for t in tops],
-                    "raw_urls": [t.get("url", "") for t in tops],
-                    "reference_only": False,
-                })
-            if digest:
-                return {"mode": "real", "digest": digest}
-        except ServiceUnavailable:
-            pass
+        results = await asyncio.gather(*[_tavily(q, max_results=8) for q, _ in queries],
+                                       return_exceptions=True)
+        digest = []
+        for (query, name), res in zip(queries, results):
+            if isinstance(res, Exception):
+                logger.warning("攻略检索「%s」失败（%s: %s）", name, type(res).__name__, res)
+                continue  # 单来源失败标记暂缺并继续（§4.3）
+            answer = res.get("answer", "")
+            tops = res.get("results", [])[:8]
+            if not tops:
+                continue
+            digest.append({
+                "source_name": f"{name}（Tavily 搜索摘要级）",
+                "source_url": tops[0]["url"] if tops else "",
+                "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "raw_answer": answer[:2000],
+                "raw_titles": [t.get("title", "")[:120] for t in tops],
+                "raw_urls": [t.get("url", "") for t in tops],
+                "reference_only": False,
+            })
+        if digest:
+            return {"mode": "real", "digest": digest}
     # 降级：模拟攻略摘要（结构化四元 + 来源）
     return {"mode": "mock", "notice": _degraded_notice(), "digest": mock_guide_digest(destination, month_hint)}
 
 
-async def search_images(spots: list[str], per_spot: int = 2) -> dict:
-    """图片搜索（§5.2）：Tavily 实景图为主源 → Wikimedia Commons 备用 → 本地 PIL 示意配图。
+async def search_images(spots: list[str], per_spot: int = 2, city: str = "") -> dict:
+    """图片搜索（§5.2）：Tavily 实景图为主源（带城市上下文双查询交叉，降低图文不符率）
+    → Wikimedia Commons 备用 → 本地 PIL 示意配图。
 
     景点级并行（信号量限 3，防图源限流）；真图与占位可混排、逐图标注来源。
     返回 mode：全实拍=real / 部分实拍=mixed / 全占位=mock（§7 降级标注）。
@@ -101,7 +121,7 @@ async def search_images(spots: list[str], per_spot: int = 2) -> dict:
         async def _fetch(spot: str) -> list[dict]:
             async with sem:
                 try:
-                    return await _spot_images(client, spot, per_spot)
+                    return await _spot_images(client, spot, per_spot, city)
                 except Exception as exc:  # noqa: BLE001 — 单景点失败不拖垮整体，降级占位
                     logger.warning("景点「%s」配图失败（%s: %s），使用本地示意配图",
                                    spot, type(exc).__name__, exc)
@@ -121,9 +141,9 @@ async def search_images(spots: list[str], per_spot: int = 2) -> dict:
     return {"mode": "real", "items": items}
 
 
-async def _spot_images(client: httpx.AsyncClient, spot: str, per_spot: int) -> list[dict]:
+async def _spot_images(client: httpx.AsyncClient, spot: str, per_spot: int, city: str = "") -> list[dict]:
     """单景点抓取链：Tavily 实景图 → Wikimedia 备用 → PIL 占位。"""
-    out = await _tavily_images(client, spot, per_spot)
+    out = await _tavily_images(client, spot, per_spot, city)
     if len(out) < per_spot:
         out += await _commons_images(client, spot, per_spot - len(out))
     if out:
@@ -137,29 +157,38 @@ def _placeholder(spot: str) -> dict:
     return {"spot": spot, "path": generate_placeholder(spot), "source": _PLACEHOLDER_SOURCE}
 
 
-async def _tavily_images(client: httpx.AsyncClient, spot: str, per_spot: int) -> list[dict]:
-    """Tavily 图片检索（include_images）：实景图候选逐个下载验证（部分图链防盗链/失效，多备几个）。"""
+async def _tavily_images(client: httpx.AsyncClient, spot: str, per_spot: int, city: str = "") -> list[dict]:
+    """Tavily 图片检索：双查询交叉（带城市/不带城市）扩候选，权威图源优先，逐个下载验证。
+
+    双查询降低图文不符率（2026-08-30 用户反馈：图片与景点不符——单查询命中无关配图）；
+    候选合并去重后按「权威媒体/官方优先」稳定排序；部分图链防盗链/失效，多备几个。"""
     if not SearchConfig.TAVILY_API_KEY:
         return []
-    try:
-        r = await client.post(TAVILY_URL, json={
-            "api_key": SearchConfig.TAVILY_API_KEY,
-            "query": f"{spot} 实景 照片",
-            "search_depth": "basic",
-            "max_results": 5,
-            "include_images": True,
-        })
-        r.raise_for_status()
-        imgs = r.json().get("images") or []
-    except Exception as exc:  # noqa: BLE001 — 单图源失败记日志后降级 Wikimedia
-        logger.warning("Tavily 图片检索「%s」失败（%s: %s）", spot, type(exc).__name__, exc)
-        return []
-    urls = [u.get("url") if isinstance(u, dict) else u for u in imgs]  # 兼容新旧两种返回形状
-    logger.info("Tavily 图片检索「%s」返回 %d 张候选", spot, len(urls))
+    queries = [f"{spot} {city} 实景".strip(), f"{spot} 景区 摄影"]
+    urls: list[str] = []
+    seen: set[str] = set()
+    for q in queries:
+        try:
+            r = await client.post(TAVILY_URL, json={
+                "api_key": SearchConfig.TAVILY_API_KEY,
+                "query": q,
+                "search_depth": "basic",
+                "max_results": 5,
+                "include_images": True,
+            })
+            r.raise_for_status()
+            imgs = r.json().get("images") or []
+        except Exception as exc:  # noqa: BLE001 — 单查询失败记日志，继续另一查询
+            logger.warning("Tavily 图片检索「%s」失败（%s: %s）", q, type(exc).__name__, exc)
+            continue
+        for u in (x.get("url") if isinstance(x, dict) else x for x in imgs):  # 兼容新旧两种返回形状
+            if u and u not in seen and not any(h in urlsplit(u).netloc for h in _WATERMARK_HOSTS):
+                seen.add(u)
+                urls.append(u)
+    logger.info("Tavily 图片检索「%s」合并候选 %d 张", spot, len(urls))
+    urls.sort(key=_host_rank)  # 稳定排序：权威图源排前，其余保持检索顺序
     out: list[dict] = []
     for url in urls[:per_spot + 4]:
-        if not url:
-            continue
         local = await _download_image(client, spot, url)
         if local:
             host = urlsplit(url).netloc or "web"
@@ -167,6 +196,12 @@ async def _tavily_images(client: httpx.AsyncClient, spot: str, per_spot: int) ->
         if len(out) >= per_spot:
             break
     return out
+
+
+def _host_rank(url: str) -> int:
+    """权威图源域名优先（稳定排序，非权威保持原相对顺序）。"""
+    host = urlsplit(url).netloc
+    return 0 if any(h in host for h in _PREFERRED_HOSTS) else 1
 
 
 async def _commons_images(client: httpx.AsyncClient, spot: str, per_spot: int) -> list[dict]:
@@ -230,5 +265,5 @@ def _guess_ext(url: str) -> str:
 
 
 def digest_to_model(digest: list[dict]) -> str:
-    """攻略摘要压缩为提示词友好文本（控制 token，风险 #2）。"""
-    return json.dumps(digest, ensure_ascii=False)[:6000]
+    """攻略摘要压缩为提示词友好文本（控制 token，风险 #2）。7 路扩容后上限同步放宽。"""
+    return json.dumps(digest, ensure_ascii=False)[:9000]

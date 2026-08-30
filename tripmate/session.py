@@ -6,7 +6,7 @@ import asyncio
 import re
 
 from .blackboard import Blackboard
-from .chatter import build_chatter, stream_chatter
+from .chatter import build_chatter, ensure_travel_dates, stream_chatter
 from .models import Draft, FinalDelivery
 from .status import AUDIT, StatusBus
 from .team import TeamRunner
@@ -15,12 +15,14 @@ from .config import ServerConfig
 # 转述调用超时上限（秒）：免费 LLM 通道限流时 openai 客户端会静默重试很久，
 # 不设上限会占死 chatter_lock，并曾异常冒泡烧掉网关推送协程（2026-08-29 诊断）。
 RELAY_TIMEOUT_S = 180.0
+# 用户消息处理超时（秒）：主备两客户端最坏路径 ~360s，420s 留余量；超时重建 Chatter 丢弃污染上下文。
+CHAT_TIMEOUT_S = 420.0
 
 _BARE_TOOL = re.compile(r"^(?:start_planning|submit_draft_feedback|get_travel_profile|save_travel_info|stop_planning)\b")
 _TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args)[^>]*>", re.IGNORECASE)
 # 启动意图断言：模型可能宣布启动（中文）而未真正调用 start_planning 工具，
-# 确定性兜底需覆盖中英文两种表述（误触发无害：TeamRunner.start() 自校验三要素+运行中防重入）
-_START_INTENT = re.compile(r"启动规划|规划团队[^。]{0,8}启动|开始规划|start_planning")
+# 确定性兜底需覆盖中英文多种表述（"启动新一轮规划"为实测漏接变体，2026-08-30）。
+_START_INTENT = re.compile(r"启动(新一轮)?(规划|规划团队)|规划团队[^。]{0,8}启动|开始规划|start_planning")
 
 
 def _missed_tool_call(reply: str) -> bool:
@@ -47,30 +49,55 @@ class Session:
     async def handle_user_message(self, text: str) -> str:
         """用户消息 → 聊天 Agent（串行化：同一时刻仅一次 Chatter 运行）。
 
-        兜底修复：provider 偶发把工具调用序列化成文本（工具未真正执行）——
+        兜底修复 1：provider 偶发把工具调用序列化成文本（工具未真正执行）——
         检测到裸工具名/工具标记时先重试一轮；start_planning 仍失败则确定性启动（§4.1 启动判定语义保持）。
+        兜底修复 2：模型可能用中文宣布启动而不真正调工具（"启动新一轮规划"实测变体）——
+        回复含启动意图且画像齐备时确定性补启动；**画像不齐时保留 Chatter 的追问原文**（信息不全时
+        该回复本就是追问，绝不用启动失败的内部术语文案覆盖它，2026-08-30 用户体验事故）。
         """
         async with self.chatter_lock:
-            reply = await stream_chatter(self.chatter, text)
+            try:
+                reply = await asyncio.wait_for(stream_chatter(self.chatter, text), timeout=CHAT_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                AUDIT.output("Chatter", f"用户消息处理超过 {int(CHAT_TIMEOUT_S)}s，重建 Chatter 实例丢弃污染上下文")
+                self.chatter = build_chatter(self.bb, self.bus, self.runner)
+                return "（系统提示）刚才的请求处理超时了，请把需求再发一次，我会重新处理。"
             if _missed_tool_call(reply):
                 nudge = ("你上一条回复想调用的工具被序列化成了文字，没有真正执行。"
                          "请立即通过工具调用通道真正执行该工具，然后给用户一句简短的自然语言回复。")
-                reply2 = await stream_chatter(self.chatter, nudge, source="system")
+                reply2 = await asyncio.wait_for(
+                    stream_chatter(self.chatter, nudge, source="system"), timeout=CHAT_TIMEOUT_S)
                 if reply2 and not _missed_tool_call(reply2):
                     reply = reply2
                 else:
                     # 两轮仍文本化：不再把乱码回给用户，诚实请其重发（黑板状态未动，草稿仍待反馈）
                     AUDIT.output("Chatter", "工具调用两轮文本化，降级为请用户重发")
                     reply = "（系统提示）我这条指令没有成功执行，请把刚才的话再发一次，我会重新处理。"
+            if not (reply or "").strip():
+                # 空回复治理（2026-08-30 用户反馈：话只进了审计日志、聊天页无输出）：补一轮总结
+                AUDIT.output("Chatter", "回复为空，nudge 补一轮自然语言总结")
+                reply = await asyncio.wait_for(
+                    stream_chatter(self.chatter,
+                                   "请用一两句自然的中文告诉用户当前进展，以及接下来需要用户做什么。"
+                                   "不要提任何内部术语。",
+                                   source="system"),
+                    timeout=CHAT_TIMEOUT_S)
+                reply = (reply or "").strip() or "我正在处理您的请求，请稍候；如有需要我会随时与您确认。"
             if reply and _START_INTENT.search(reply):
-                task = self.runner._task
-                if not self.runner.active and (task is None or task.done()):
-                    receipt = self.runner.start()
-                    if receipt["status"] == "accepted":
-                        reply = ("信息已齐备，旅行规划团队已在后台启动 🚀 "
-                                 "规划期间您可以继续补充或修改信息，草稿出来后我会请您确认。")
-                    else:
-                        reply = f"启动规划未成功：{receipt.get('reason', '')}"
+                missing = self.bb.profile.basic_info.missing_required()
+                if missing:
+                    # 信息不全：这条回复是礼貌追问而非启动宣言，原样放行，绝不覆盖
+                    AUDIT.output("Chatter", f"回复含启动字样但缺 {'、'.join(missing)}，保留追问不兜底")
+                else:
+                    task = self.runner._task
+                    if not self.runner.active and (task is None or task.done()):
+                        await ensure_travel_dates(self.bb, self.bus)  # 与工具路径对齐：日期缺失确定性补齐
+                        receipt = self.runner.start()
+                        if receipt["status"] == "accepted":
+                            reply = ("信息已齐备，旅行规划团队已在后台启动 🚀 "
+                                     "规划期间您可以继续补充或修改信息，草稿出来后我会请您确认。")
+                        else:
+                            reply = "规划团队暂时忙碌，您可以继续补充信息，稍后再告诉我开始规划。"
             return reply
 
     async def relay_team_event(self, note: str) -> str:

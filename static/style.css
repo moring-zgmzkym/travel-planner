@@ -51,7 +51,17 @@ body {
 
 /* 聊天区 */
 .chat-col { display: flex; flex-direction: column; overflow: hidden; }
-.chat-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.chat-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.session-bar { display: flex; gap: 6px; align-items: center; }
+.session-bar select {
+  max-width: 200px; font-size: 12px; padding: 4px 6px; border: 1px solid var(--line);
+  border-radius: 8px; background: #fff; color: var(--sub);
+}
+.session-bar button {
+  font-size: 12px; padding: 4px 10px; border: 1px solid var(--brand); border-radius: 8px;
+  background: #fff; color: var(--brand); cursor: pointer;
+}
+.session-bar button:hover { background: var(--brand); color: #fff; }
 .agents-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .agent-chip {
   font-size: 11px; padding: 3px 9px; border-radius: 12px; background: #f0f3f8; color: var(--sub);

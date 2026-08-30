@@ -60,7 +60,7 @@ python run.py          # 或 Windows 双击 run.bat
 | `tripmate/pdf_gen.py` | reportlab PDF（weasyprint 在 Windows 缺 GTK，按企划书备选方案切换） |
 | `tripmate/gateway/app.py` | FastAPI + WebSocket 网关 |
 | `static/` | 前端三件套（原生 JS） |
-| `tests/` | 44 项单测（黑板/影响分析/打分/校验/selector/PDF/主备切换） |
+| `tests/` | 53 项单测（黑板/影响分析/打分/校验/selector/路书PDF/主备切换/二次规划/会话） |
 | `scripts/` | 端到端冒烟脚本（e2e_step1/2/3） |
 | `outputs/` | PDF 与配图产物 |
 | `logs/tripmate.log` | ReAct 审计日志（Thought→Action→Observation→产出，验收 #16 证据） |
@@ -97,7 +97,7 @@ python run.py          # 或 Windows 双击 run.bat
 ## 测试
 
 ```bash
-python -m pytest tests/ -q          # 44 项单测
+python -m pytest tests/ -q          # 53 项单测
 python scripts/e2e_step1_chatter.py # 冒烟① Chatter 抽取与启动判定（需 LLM）
 python scripts/e2e_step2_collect.py # 冒烟② 四 Agent 协同出草稿（需 LLM）
 python scripts/e2e_step3_full.py    # 冒烟③ 中途改预算→反馈修订→确认→PDF 全流程（需 LLM）
@@ -106,7 +106,9 @@ python scripts/e2e_step4_finalize.py# 冒烟④ 定稿→PDF/订单清单（无�
 
 ## 已知边界（如实声明）
 
-- MVP 单用户单会话（§2.3）；多用户并发为二期。
+- 多会话为内存态（服务重启后会话丢失，会话不落盘持久化）；多用户并发隔离为二期。
+- 小红书无公开图文接口（登录墙+反爬，Tavily 亦无法穿透），攻略与图片走全网+站点限定检索，
+  图片按权威媒体/官方图源优先排序。
 - 支付不接触（需商户资质，§4.4/§7），只做订单参数汇总 + 直达链接。
 - weasyprint 在 Windows 需 GTK 运行库，本项目按企划书备选方案采用 reportlab（HTML 模板仍用于网页端草稿预览）。
 - 12306-MCP 为社区实现，可能随 12306 接口变动失效；失效自动降级并提示。

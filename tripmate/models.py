@@ -97,6 +97,8 @@ class HotelCandidate(BaseModel):
     reason: str = ""
     source: str = "酒店 MCP"
     reference_only: bool = False
+    image_path: str = ""       # 宣传图本地路径（需求 6：勾选酒店补充，失败留空）
+    review_digest: str = ""    # 住客评价摘要（Tavily 检索，失败留空）
 
 
 class ImageItem(BaseModel):

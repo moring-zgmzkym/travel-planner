@@ -8,6 +8,8 @@ let ws = null;
 let pingTimer = null;
 let busyTimer = null;
 let busy = false; // Chatter 处理中（等待回复期间禁止重复发送）
+let reconnected = false; // 是否发生过断线重连（首页首连不提示）
+let sid = localStorage.getItem("tm_sid") || "default"; // 当前会话（需求 2 对话管理）
 
 const AGENT_NAMES = {
   Chatter: "聊天管家", InformationProcessor: "信息处理", Researcher: "信息收集",
@@ -17,13 +19,19 @@ const AGENT_NAMES = {
 /* ---------- WebSocket ---------- */
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?sid=${encodeURIComponent(sid)}`);
   ws.onopen = () => {
     $("conn-dot").classList.add("on");
     if (pingTimer) clearInterval(pingTimer);
     pingTimer = setInterval(() => {  // 心跳 30s（§2.3）
       if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
     }, 25000);
+    if (reconnected) {  // 断线重连：解除"思考中"死锁（回复可能已随断线丢失，2026-08-30）
+      setBusy(false);
+      addTimeline("System", "INFO", "连接已恢复，若刚发送的消息没有响应，请重新发送一次。");
+    }
+    reconnected = true;
+    refreshSessions();
   };
   ws.onclose = () => {
     $("conn-dot").classList.remove("on");
@@ -37,7 +45,55 @@ function sendMsg(text) {
 }
 
 /* ---------- 消息处理 ---------- */
+/* ---------- 会话管理（需求 2） ---------- */
+async function refreshSessions() {
+  try {
+    const r = await fetch("/api/sessions");
+    const list = await r.json();
+    const sel = $("session-select");
+    sel.innerHTML = "";
+    for (const it of list) {
+      const opt = document.createElement("option");
+      opt.value = it.sid;
+      opt.textContent = it.title;
+      sel.appendChild(opt);
+    }
+    sel.value = sid;
+    if (sel.selectedIndex < 0) { sel.value = "default"; sid = "default"; }
+  } catch (e) { /* 列表刷新失败不影响主流程 */ }
+}
+
+function switchSession(nextSid) {
+  if (nextSid === sid) return;
+  sid = nextSid;
+  localStorage.setItem("tm_sid", sid);
+  $("chat").innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "msg sys";
+  div.textContent = "已切换对话。该对话的规划进展与成果如下方所示（历史消息不跨对话保留）。";
+  $("chat").appendChild(div);
+  $("timeline").innerHTML = "";
+  setBusy(false);
+  if (ws) ws.close(); // onclose 自动以新 sid 重连，服务端补播该会话状态
+}
+
+async function createSession() {
+  try {
+    const r = await fetch("/api/sessions", { method: "POST" });
+    const it = await r.json();
+    await refreshSessions();
+    switchSession(it.sid);
+  } catch (e) { addTimeline("System", "STATUS_ERROR", "新对话创建失败，请重试。"); }
+}
+
 function handleMsg(m) {
+  if (m.type === "session") {
+    sid = m.sid;
+    localStorage.setItem("tm_sid", sid);
+    const sel = $("session-select");
+    if (sel.value !== sid) { refreshSessions(); }
+    return;
+  }
   if (m.type === "status" || m.type === "AGENT_MESSAGE") {
     addTimeline(m.agent, m.kind || m.type, m.text);
     flashAgent(m.agent);
@@ -190,5 +246,8 @@ sendBtn.addEventListener("click", doSend);
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); }
 });
+
+$("session-select").addEventListener("change", (e) => switchSession(e.target.value));
+$("new-session").addEventListener("click", createSession);
 
 connect();

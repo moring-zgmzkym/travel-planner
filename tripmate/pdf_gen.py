@@ -20,8 +20,8 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (Image, Paragraph, SimpleDocTemplate,
-                                Spacer, Table, TableStyle)
+from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph,
+                                SimpleDocTemplate, Spacer, Table, TableStyle)
 
 from .config import OUTPUT_DIR
 from .models import TravelProfile
@@ -117,7 +117,6 @@ def _footer(canvas) -> None:
 
 # ---- 首屏横幅（PIL 绘制：实拍图裁剪 + 压暗标题条；无图/失败回退品牌纯色）----
 
-_BANNER_W, _BANNER_H = 1100, 348  # ≈178×56mm
 
 
 def _pil_font(size: int) -> ImageFont.FreeTypeFont:
@@ -141,50 +140,6 @@ def _crop_ratio(im: PILImage.Image, ratio: float, anchor: float = 0.45) -> PILIm
     return im.crop((left, 0, left + tw, h))
 
 
-def _banner_text(draw: ImageDraw.ImageDraw, title: str, sub: str) -> None:
-    draw.text((40, _BANNER_H - 108), title, font=_pil_font(62), fill=(255, 255, 255))
-    draw.text((44, _BANNER_H - 40), sub, font=_pil_font(28), fill=(214, 226, 240))
-
-
-def _make_banner(profile: TravelProfile) -> str:
-    basic = profile.basic_info
-    title = f"{basic.destination or '旅行'} · 行程计划"
-    d0 = basic.travel_dates[0] if basic.travel_dates else "日期待定"
-    d1 = basic.travel_dates[-1] if basic.travel_dates else ""
-    sub = f"{basic.origin or ''} 出发 · {d0} ~ {d1} · {basic.days or '-'} 天".replace(" ~  · ", " · ")
-    out = CROP_DIR / ("banner_" + hashlib.md5(f"{title}|{_BANNER_H}".encode()).hexdigest()[:12] + ".jpg")
-    try:
-        CROP_DIR.mkdir(parents=True, exist_ok=True)
-        # 横幅只用实拍图：示意/占位卡内部自带文字，裁剪后与标题串层（judge 验收实测），跳过
-        for item in profile.images[:8]:
-            if any(k in (item.source or "") for k in ("示意", "非实景", "占位")):
-                continue
-            try:
-                with PILImage.open(item.path) as im:
-                    base = _crop_ratio(im.convert("RGB"), _BANNER_W / _BANNER_H).resize(
-                        (_BANNER_W, _BANNER_H))
-                band = PILImage.new("RGBA", (_BANNER_W, _BANNER_H), (0, 0, 0, 0))
-                bd = ImageDraw.Draw(band)
-                bd.rectangle((0, _BANNER_H - 130, _BANNER_W, _BANNER_H), fill=(13, 36, 66, 175))
-                base = PILImage.alpha_composite(base.convert("RGBA"), band).convert("RGB")
-                _banner_text(ImageDraw.Draw(base), title, sub)
-                base.save(out, quality=88)
-                return str(out)
-            except Exception:  # noqa: BLE001 — 单图不可读换下一张
-                continue
-    except Exception:  # noqa: BLE001 — 横幅整体失败回退纯色
-        pass
-    base = PILImage.new("RGB", (_BANNER_W, _BANNER_H), (26, 95, 180))
-    _banner_text(ImageDraw.Draw(base), title, sub)
-    try:
-        base.save(out, quality=88)
-        return str(out)
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-# ---- 通用构件 ----
-
 def _section(num: str, title: str) -> Table:
     """编号分区标题：品牌色编号方块 + 粗体标题 + 基线细横线。"""
     t = Table([[Paragraph(num, _style("secnum", 12, bold=True, color=colors.white,
@@ -198,30 +153,6 @@ def _section(num: str, title: str) -> Table:
         ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ("LEFTPADDING", (1, 0), (1, 0), 8),
     ]))
-    return t
-
-
-def _chips(texts: list[str]) -> Table:
-    """信息 chips：浅底小块 + 白色间隔；宽度按 stringWidth 实测（中文不溢出），总和超宽时收缩。"""
-    cells, widths = [], []
-    gap = 3.5 * mm
-    for i, txt in enumerate(texts):
-        if i:
-            cells.append("")
-            widths.append(gap)
-        cells.append(Paragraph(txt, _style(f"chip{i}", 9, bold=True, color=PRIMARY,
-                                           alignment=TA_CENTER, leading=13)))
-        widths.append(min(pdfmetrics.stringWidth(txt, _bold_name, 9) + 10 * mm, _CONTENT_W))
-    total = sum(widths)
-    if total > _CONTENT_W:  # 兜底：等比收缩，保证永不溢出页边
-        k = (_CONTENT_W - gap * (len(texts) - 1)) / (total - gap * (len(texts) - 1))
-        widths = [w if j % 2 == 0 else gap for j, w in enumerate((w * k for w in widths))]
-    t = Table([cells], colWidths=widths)
-    style = [("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-             ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5)]
-    for j in range(0, len(cells), 2):
-        style.append(("BACKGROUND", (j, 0), (j, 0), BG_LIGHT))
-    t.setStyle(TableStyle(style))
     return t
 
 
@@ -359,6 +290,122 @@ def _image_cell(spot: str, path: str, source: str) -> Table:
     return t
 
 
+# ---- 封面页（需求 7：参考"旅行路书"模板——深蓝底 + 目的地实拍条 + 大字标题 + 数据徽章）----
+
+_COVER_W, _COVER_H = 1100, 1528  # ≈178×247mm（A4 内容区整页）
+_NAVY_TOP, _NAVY_BOT = (27, 40, 74), (32, 54, 104)
+_GOLD = (212, 175, 105)
+
+
+def _cover_base() -> PILImage.Image:
+    """深蓝竖向渐变底。"""
+    base = PILImage.new("RGB", (_COVER_W, _COVER_H))
+    px = base.load()
+    for y in range(_COVER_H):
+        t = y / (_COVER_H - 1)
+        px_row = tuple(int(a + (b - a) * t) for a, b in zip(_NAVY_TOP, _NAVY_BOT))
+        for x in range(_COVER_W):
+            px[x, y] = px_row
+    return base
+
+
+def _draw_center(draw: ImageDraw.ImageDraw, y: int, text: str, font, fill) -> None:
+    x = (_COVER_W - draw.textlength(text, font=font)) / 2
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def _make_cover(profile: TravelProfile) -> str:
+    """封面：深蓝底 + 底部实拍条（渐变融入）+ 大字标题 + 风格 tag + 底部信息行。
+
+    全程回退安全：无实拍图/绘制失败均回退纯色封面。"""
+    basic = profile.basic_info
+    dest = basic.destination or "旅行"
+    days = basic.days or "-"
+    out = CROP_DIR / ("cover_" + hashlib.md5(f"{dest}|{days}|v1".encode()).hexdigest()[:12] + ".jpg")
+    try:
+        CROP_DIR.mkdir(parents=True, exist_ok=True)
+        base = _cover_base().convert("RGBA")
+        # 底部实拍条：高 420px，顶缘 160px 渐变融入深蓝
+        strip_h, blend = 420, 160
+        for item in profile.images[:8]:
+            if any(k in (item.source or "") for k in ("示意", "非实景", "占位")) or not item.path:
+                continue
+            try:
+                with PILImage.open(item.path) as im:
+                    photo = _crop_ratio(im.convert("RGB"), _COVER_W / strip_h).resize((_COVER_W, strip_h))
+                mask = PILImage.new("L", (_COVER_W, strip_h), 255)
+                mpx = mask.load()
+                for y in range(blend):
+                    v = int(255 * y / blend)
+                    for x in range(_COVER_W):
+                        mpx[x, y] = v
+                base.paste(photo, (0, _COVER_H - strip_h), mask)
+                break
+            except Exception:  # noqa: BLE001 — 换下一张
+                continue
+        d = ImageDraw.Draw(base)
+        # 金色细线 + 底部信息
+        d.rectangle((0, _COVER_H - strip_h - 3, _COVER_W, _COVER_H - strip_h), fill=_GOLD)
+        d.rectangle((0, 0, 14, _COVER_H), fill=_GOLD)
+        f_tag = _pil_font(26)
+        f_title = _pil_font(88)
+        f_sub = _pil_font(34)
+        f_chip = _pil_font(24)
+        # 顶部 tagline 胶囊
+        tagline = " · ".join(basic.style or []) or "轻松出行"
+        tagline = f"{basic.origin or '出发地'} 出发 · {tagline}"
+        tw = d.textlength(tagline, font=f_tag)
+        x0, y0 = (_COVER_W - tw) / 2 - 34, 300
+        d.rounded_rectangle((x0, y0, x0 + tw + 68, y0 + 58), radius=29,
+                            outline=_GOLD, width=2)
+        _draw_center(d, y0 + 12, tagline, f_tag, _GOLD)
+        # 主标题 / 副标题
+        _draw_center(d, 470, f"{dest}", f_title, (255, 255, 255))
+        sub = f"{days} 天旅行路书".replace(" -1 天", "")
+        _draw_center(d, 590, sub, f_sub, (222, 230, 242))
+        sub2 = f"{basic.origin or ''} — {dest} · TRIPMATE ITINERARY".strip(" —")
+        _draw_center(d, 648, sub2, _pil_font(22), (150, 168, 196))
+        # 风格 tag 胶囊行
+        tags = (basic.style or [])[:4] or ["休闲"]
+        chip_gap, pad = 18, 46
+        widths = [d.textlength(t, font=f_chip) + pad * 2 for t in tags]
+        total = sum(widths) + chip_gap * (len(tags) - 1)
+        cx, cy = (_COVER_W - total) / 2, 760
+        for t, w in zip(tags, widths):
+            d.rounded_rectangle((cx, cy, cx + w, cy + 52), radius=26,
+                                outline=(150, 168, 196), width=2)
+            tx = cx + (w - d.textlength(t, font=f_chip)) / 2
+            d.text((tx, cy + 10), t, font=f_chip, fill=(200, 212, 230))
+            cx += w + chip_gap
+        # 底部信息行（实拍条之上）
+        info_y = _COVER_H - strip_h - 96
+        f_num = _pil_font(46)
+        f_lab = _pil_font(20)
+        party = basic.party_size or detail.party_size if (detail := profile.detail_info) else basic.party_size
+        stats = [(f"{days}天", f"{basic.travel_mode or '高铁'} 往返"),
+                 (basic.travel_dates[0] if basic.travel_dates else (basic.date_text or "日期待定"), "出行时间"),
+                 (f"{party or '-'} 人", "同行人数"),
+                 (f"¥{int(basic.budget)}" if basic.budget else "-", "预算参考")]
+        col_w = _COVER_W / len(stats)
+        for i, (num, lab) in enumerate(stats):
+            cx = col_w * i + col_w / 2
+            d.text((cx - d.textlength(num, font=f_num) / 2, info_y), num, font=f_num, fill=_GOLD)
+            d.text((cx - d.textlength(lab, font=f_lab) / 2, info_y + 66), lab, font=f_lab,
+                   fill=(180, 194, 216))
+        base = base.convert("RGB")
+        base.save(out, quality=90)
+        return str(out)
+    except Exception:  # noqa: BLE001 — 封面失败回退纯色
+        try:
+            base = _cover_base()
+            d = ImageDraw.Draw(base)
+            _draw_center(d, 600, f"{dest} · 旅行路书", _pil_font(80), (255, 255, 255))
+            base.save(out, quality=90)
+            return str(out)
+        except Exception:  # noqa: BLE001
+            return ""
+
+
 # ---- 主流程 ----
 
 def build_pdf(profile: TravelProfile, run_id: str) -> str:
@@ -370,46 +417,88 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
     doc = SimpleDocTemplate(str(out), pagesize=A4,
                             leftMargin=_M, rightMargin=_M,
                             topMargin=15 * mm, bottomMargin=18 * mm,
-                            title=f"TripMate 行程计划 · {basic.destination}")
+                            title=f"TripMate 旅行路书 · {basic.destination}")
     story: list = []
 
-    # ---- 首屏横幅 + 信息 chips ----
-    banner = _make_banner(profile)
-    if banner:
-        story.append(Image(banner, width=_CONTENT_W, height=_CONTENT_W * _BANNER_H / _BANNER_W))
+    # ---- 封面页（需求 7：路书模板；无图/绘制失败自动回退纯色封面）----
+    cover = _make_cover(profile)
+    if cover:
+        story.append(Image(cover, width=_CONTENT_W, height=_CONTENT_W * _COVER_H / _COVER_W))
+        story.append(PageBreak())
+
+    # ---- 壹 行程总览（关键信息一览，全部来自黑板真实数据）----
+    story.append(_section("壹", "行程总览"))
+    story.append(Spacer(1, 4))
     party = detail.party_size or basic.party_size or 1
-    d0 = basic.travel_dates[0] if basic.travel_dates else "日期待定"
+    d0 = basic.travel_dates[0] if basic.travel_dates else (basic.date_text or "日期待定")
     d1 = basic.travel_dates[-1] if basic.travel_dates else ""
-    if (len(d0) == len(d1) == 10 and d0[:4] == d1[:4] and d0[:4].isdigit()):
-        d0, d1 = d0[5:], d1[5:]  # 同年份去前缀，chips 更紧凑（完整日期在横幅副题）
-    budget_txt = int(basic.budget) if basic.budget and basic.budget == int(basic.budget) else (basic.budget or "-")
-    chips = [f"{basic.origin or '-'} → {basic.destination or '-'}",
-             f"{d0} ~ {d1}", f"{basic.days or '-'} 天", basic.travel_mode or "-",
-             f"{party} 人", f"预算 {budget_txt} 元"]
-    story.append(Spacer(1, 5))
-    story.append(_chips(chips))
+    dates_txt = f"{d0} ~ {d1}" if (d1 and d1 != d0) else d0
+    budget_txt = f"¥{basic.budget:g}" if basic.budget else "-"
+    hotel_pref = detail.hotel.location_pref or "-"
+    must = "、".join(detail.must_visit[:6]) or "-"
+    styles = " / ".join(basic.style or []) or "休闲"
+    rhythm = {"快": "4-5 个景点/天", "慢": "1-2 个景点/天"}.get(detail.pace or "", "2-3 个景点/天")
+    overview_rows = [
+        ["目的地", basic.destination or "-", "出发地", basic.origin or "-"],
+        ["出行时间", dates_txt, "行程天数", f"{basic.days or '-'} 天"],
+        ["交通方式", basic.travel_mode or "-", "同行人数", f"{party} 人"],
+        ["预算参考", f"{budget_txt}（上限 {basic.budget_max:g}）" if basic.budget_max else budget_txt,
+         "旅行风格", styles],
+        ["酒店偏好", hotel_pref, "必去景点", must],
+        ["游览节奏", rhythm, "数据说明", "车票/酒店以订单清单为准"],
+    ]
+    info_cells = []
+    for row in overview_rows:
+        info_cells.append([
+            Paragraph(row[0], _style("ovk", 9, bold=True, color=PRIMARY)),
+            Paragraph(str(row[1]), _style("ovv", 9)),
+            Paragraph(row[2], _style("ovk2", 9, bold=True, color=PRIMARY)),
+            Paragraph(str(row[3]), _style("ovv2", 9)),
+        ])
+    t = Table(info_cells, colWidths=[20 * mm, 69 * mm, 20 * mm, 69 * mm])
+    t.setStyle(TableStyle([
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [BG_LIGHT, colors.white]),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, HAIRLINE),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(t)
+    if profile.draft:  # 每日节奏一行速览（真实草稿数据）
+        rhythm_line = " ｜ ".join(
+            f"D{i + 1} {'→'.join(d.spots[:3]) or (d.morning or '')[:12]}"
+            for i, d in enumerate(profile.draft.days))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(f"每日节奏：{rhythm_line}", _style("rhythm", 9, color=GRAY)))
     story.append(Spacer(1, 7))
 
-    # ---- 一、推荐订单清单 ----
-    story.append(_section("1", "推荐订单清单（Agent 已按您的要求筛选勾选）"))
+    # ---- 贰 推荐订单清单 ----
+    story.append(_section("贰", "推荐订单清单（Agent 已按您的要求筛选勾选）"))
     hdr = lambda s: Paragraph(s, _style("th", 9, bold=True, color=colors.white))  # noqa: E731
+
+    def _link_cell(url: str, label: str) -> str:
+        """友好锚文本超链接：原始长 URL 会把 30mm 窄列按字符硬换行撑爆版面（2026-08-30 实测）。"""
+        return (f'<a href="{url}" color="{PRIMARY_HEX}"><u>{label}</u></a>' if url else "—")
+
     order_rows = [[hdr("类型"), hdr("名称/班次"), hdr("关键信息"), hdr("推荐理由"), hdr("直达链接")]]
     for t in profile.tickets:
         reason = (f'<font face="{_bold_name}" color="{SUCCESS_HEX}">√ 已勾选</font>　' if t.selected else "") + (t.reason or "")
         order_rows.append(["车票", t.train_no,
                            f"{t.depart_time} 出发 / {t.arrive_time} 到达，{t.price} 元",
-                           Paragraph(reason, _style("reason", 8.5)), t.link or "—"])
+                           Paragraph(reason, _style("reason", 8.5)),
+                           Paragraph(_link_cell(t.link, "12306 购票"), _style("linkcell", 8.5))])
     for h in profile.hotels:
         reason = (f'<font face="{_bold_name}" color="{SUCCESS_HEX}">√ 已勾选</font>　' if h.selected else "") + (h.reason or "")
         order_rows.append(["酒店", h.name,
-                           f"{h.price_per_night} 元/晚，距地标 {h.distance_km}km，评分 {h.rating}",
-                           Paragraph(reason, _style("reason2", 8.5)), h.link or "—"])
+                           f"{h.price_per_night:g} 元/晚，距地标 {h.distance_km:g}km，评分 {h.rating:g}",
+                           Paragraph(reason, _style("reason2", 8.5)),
+                           Paragraph(_link_cell(h.link, "携程订房"), _style("linkcell2", 8.5))])
     story.append(_table(order_rows, [14 * mm, 32 * mm, 50 * mm, 52 * mm, 30 * mm], font_size=8.5))
     total_order = sum(t.price * (2 if "往返" not in t.train_no else 1) * party
                       for t in profile.tickets if t.selected)
     total_order += sum(h.price_per_night * max((basic.days or 1) - 1, 0)
                        for h in profile.hotels if h.selected)
-    story.append(Paragraph(f"已勾选订单合计（交通往返 + 住宿）：<font face=\"{_bold_name}\">约 {round(total_order, 1)} 元</font>",
+    story.append(Paragraph(f"已勾选订单合计（交通往返 + 住宿）：<font face=\"{_bold_name}\">约 {total_order:g} 元</font>",
                            _style("order_total", 10, spaceBefore=4, spaceAfter=2)))
     ref_notes = [x.source for x in (*profile.tickets, *profile.hotels) if x.reference_only]
     if ref_notes:
@@ -417,13 +506,13 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
                                _style("refnote", 8.5, color=WARN, spaceAfter=4)))
     story.append(Spacer(1, 7))
 
-    # ---- 二、逐日行程 ----
-    story.append(_section("2", "逐日行程"))
+    # ---- 叁 逐日行程 ----
+    story.append(_section("叁", "逐日行程"))
     if profile.draft:
-        slot_st = lambda: _style("slot", 9, bold=True, color=PRIMARY)  # noqa: E731
+        slot_st = lambda: _style("slot", 9, bold=True, color=ACCENT)  # noqa: E731
         for i, day in enumerate(profile.draft.days):
             wk = _weekday(day.date, basic.travel_dates)
-            label = f"第 {i + 1} 天 · {day.date}" + (f" · {wk}" if wk else "")
+            label = f"DAY {i + 1} · {day.date}" + (f" · {wk}" if wk else "")
             body_rows = [
                 [Paragraph("上午", slot_st()),
                  Paragraph(day.morning or "—", _style("cell", 9.5))],
@@ -464,15 +553,15 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
             story.append(Spacer(1, 5))
     story.append(Spacer(1, 2))
 
-    # ---- 三、预算核算 ----
-    story.append(_section("3", "预算核算（全团口径）"))
-    note = (f"预算 {budget['budget'] or '-'}｜上限 {budget['budget_max'] or '-'}｜"
+    # ---- 肆 预算核算 ----
+    story.append(_section("肆", "预算核算（全团口径）"))
+    note = (f"预算 {budget['budget']:g}｜上限 {budget['budget_max']:g}｜"
             f"占用 {budget['occupancy']:.0%}") if budget["occupancy"] else "—"
     b_rows = [[hdr("项目"), hdr("说明"), hdr("金额（元）")]] + [
-        [r["item"], r["note"], f"{r['amount']}"] for r in budget["items"]
+        [r["item"], r["note"], f"{r['amount']:g}"] for r in budget["items"]
     ]
     b_rows.append([Paragraph("合计", _style("bsum", 9.5, bold=True)), Paragraph(note, _style("bsumnote", 9)),
-                   Paragraph(f"{budget['total']}", _style("bsumamt", 9.5, bold=True, alignment=2))])
+                   Paragraph(f"{budget['total']:g}", _style("bsumamt", 9.5, bold=True, alignment=2))])
     story.append(_table(b_rows, [26 * mm, 112 * mm, 40 * mm], right_cols=(2,)))
     occ = max(0.0, min(float(budget["occupancy"] or 0), 1.0))
     if occ > 0:
@@ -484,16 +573,20 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
             ("LINEBELOW", (0, 0), (-1, -1), 0.4, HAIRLINE),
         ]))
         story.append(Spacer(1, 4))
-        story.append(bar)
-        story.append(Paragraph(f"预算占用 {occ:.0%}（合计 {budget['total']} 元）",
-                               _style("barcap", 8, color=GRAY, spaceBefore=2)))
+        # 条+说明绑定不分页（避免占用条落在页底、说明行被孤立到下一页）
+        story.append(KeepTogether([
+            bar,
+            # 口径与预算表一致：条宽按 clamp 后比例画，数字展示真实占用（可超 100%）
+            Paragraph(f"预算占用 {float(budget['occupancy'] or 0):.0%}（合计 {budget['total']:g} 元）",
+                      _style("barcap", 8, color=GRAY, spaceBefore=2)),
+        ]))
     for w in budget["warnings"]:
         story.append(Paragraph("※ " + w, _style("bwarn", 9.5, color=WARN, spaceBefore=3)))
     story.append(Spacer(1, 7))
 
-    # ---- 四、实拍配图 ----
+    # ---- 伍 实景速览 ----
     if profile.images:
-        story.append(_section("4", "目的地配图（均标注来源）"))
+        story.append(_section("伍", "实景速览（均标注来源）"))
         story.append(Spacer(1, 3))
         imgs = profile.images[:8]
         for r in range(0, len(imgs), 2):
@@ -508,8 +601,46 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
             story.append(Spacer(1, 5))
         story.append(Spacer(1, 2))
 
-    # ---- 五、美食推荐 ----
-    story.append(_section("5", "美食推荐"))
+    # ---- 陆 推荐酒店（需求 6：实景 + 评分 + 网络评价；仅展示已补充信息的勾选酒店）----
+    enriched = [h for h in profile.hotels if (h.image_path or h.review_digest) and h.selected] \
+        or [h for h in profile.hotels if h.image_path or h.review_digest]
+    if enriched:
+        hotel_flow: list = []
+        for h in enriched[:2]:
+            left_cells = []
+            if h.image_path:  # 空路径直接走文字卡（PIL 对空串的异常发生在 doc.build 期，兜不住）
+                try:
+                    img_path = _crop_43(h.image_path)
+                    left_cells.append([Image(img_path, width=60 * mm, height=45 * mm)])
+                except Exception:  # noqa: BLE001 — 图缺退文字
+                    left_cells.append([Paragraph("酒店图片暂缺", _style("noimg2", 9, color=GRAY))])
+            else:
+                left_cells.append([Paragraph("酒店图片暂缺", _style("noimg2", 9, color=GRAY))])
+            right_cells = [
+                [Paragraph(h.name, _style("hname", 11, bold=True))],
+                [Paragraph(f"★ {h.rating:g}｜{h.price_per_night:g} 元/晚｜距地标 {h.distance_km:g}km"
+                           + ("　<font face=\"{}\" color=\"{}\">√ 已勾选</font>".format(_bold_name, SUCCESS_HEX)
+                              if h.selected else ""), _style("hmeta", 9))],
+                [Paragraph(f"网络评价：{h.review_digest}" if h.review_digest else "网络评价：暂无",
+                           _style("hreview", 8.5, color=GRAY, leading=12))],
+            ]
+            card = Table([[left_cells, right_cells]], colWidths=[64 * mm, _CONTENT_W - 64 * mm])
+            card.setStyle(TableStyle([
+                ("BOX", (0, 0), (-1, -1), 0.5, HAIRLINE),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            hotel_flow.append(card)
+            hotel_flow.append(Spacer(1, 5))
+        # 标题与首卡绑定，避免章节头孤立在页底
+        story.append(KeepTogether([_section("陆", "推荐酒店（实景 + 网络评价）"),
+                                   Spacer(1, 3), hotel_flow[0], hotel_flow[1]]))
+        story.extend(hotel_flow[2:])
+        story.append(Spacer(1, 2))
+
+    # ---- 柒 美食与注意事项 ----
+    story.append(_section("柒", "美食与注意事项"))
     foods: list[str] = []
     for g in profile.guide_digest:
         foods += g.foods
@@ -525,10 +656,9 @@ def build_pdf(profile: TravelProfile, run_id: str) -> str:
         foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
             else "暂无（攻略通道未返回）"
     story.append(Paragraph(foods_text, _style("foods", 10)))
-    story.append(Spacer(1, 7))
+    story.append(Spacer(1, 6))
 
-    # ---- 六、注意事项与数据来源 ----
-    story.append(_section("6", "注意事项与数据来源"))
+    # ---- 注意事项与数据来源（并入柒）----
     warns: list[str] = []
     for g in profile.guide_digest:
         warns += g.warnings

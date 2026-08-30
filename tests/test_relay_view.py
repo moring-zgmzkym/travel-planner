@@ -97,7 +97,7 @@ def test_sender_survives_relay_crash(monkeypatch):
         async def send_text(self, raw: str):
             self.sent.append(json.loads(raw))
 
-    s = app.session
+    s = app.sessions["default"]  # 需求 2：会话注册表（原全局 session）
     _fill_draft(s.bb)
 
     async def boom(*a, **k):
@@ -107,7 +107,7 @@ def test_sender_survives_relay_crash(monkeypatch):
 
     async def main():
         ws = FakeWS()
-        sender = asyncio.create_task(app._sender(ws))
+        sender = asyncio.create_task(app._sender(ws, s))
         try:
             await asyncio.sleep(0.05)
             s.team_events.put_nowait(("draft_ready", s.bb.profile.draft))

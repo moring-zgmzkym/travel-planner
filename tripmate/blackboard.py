@@ -32,6 +32,28 @@ class Blackboard:
     def version(self) -> int:
         return self._profile.version
 
+    def clear_sections(self, sections: dict[str, Any], writer: WriterName, reason: str) -> None:
+        """新 run 边界的同步清空（team.start() 受理后调用）。
+
+        此刻上一轮团队任务已确认结束、新一轮任务尚未创建，事件循环上无并发写者，
+        因此不走 asyncio.Lock，直接落 setattr + 版本号 + changelog（语义与 write 一致）。
+        """
+        for section, value in sections.items():
+            old = getattr(self._profile, section)
+            setattr(self._profile, section, value)
+            self._profile.version += 1
+            self._profile.updated_at = _now()
+            self._profile.changelog.append(ChangelogEntry(
+                time=_now(),
+                version=self._profile.version,
+                writer=writer,
+                section=section,
+                field=section,
+                old=_short(old),
+                new=_short(value),
+                reason=reason,
+            ))
+
     # ---- 写（串行化 + changelog + 版本号） ----
     async def write(
         self,

@@ -1,11 +1,90 @@
-"""酒店适配层（§4.4）：酒店 MCP（社区，覆盖不全）→ 高德距离计算 → 打分勾选 → 降级模拟。"""
+"""酒店适配层（§4.4）：酒店 MCP（社区，覆盖不全）→ 高德距离计算 → 打分勾选 → 降级模拟。
+
+需求 6（2026-08-30）：勾选酒店的宣传图 + 住客评价摘要补充（Tavily 通道，失败留空不阻塞）。
+"""
 
 from __future__ import annotations
 
-from ..config import ALLOW_MOCK_FALLBACK, McpConfig
+import hashlib
+import logging
+from urllib.parse import urlsplit
+
+import httpx
+
+from ..config import ALLOW_MOCK_FALLBACK, IMAGE_DIR, McpConfig, SearchConfig
 from ..mocks.data import kb_for_city, mock_hotels
 from .mcp_client import ServiceUnavailable, amap_session, hotel_session
 from .resilience import with_retry
+from .search import _IMG_HEADERS, _IMG_TIMEOUT_S, _WATERMARK_HOSTS
+
+logger = logging.getLogger("tripmate.tools.hotels")
+
+
+async def enrich_hotels(hotels: list, city: str, top: int = 2) -> None:
+    """为已勾选的前 top 家酒店补充宣传图与住客评价摘要（需求 6，2026-08-30）。
+
+    就地写入 HotelCandidate.image_path / review_digest；任一步失败留空，绝不阻塞主流程
+    （Tavily 未配置/无结果/下载失败均为正常降级）。"""
+    targets = [h for h in hotels if h.selected][:top]
+    if not targets or not SearchConfig.TAVILY_API_KEY:
+        return
+    async with httpx.AsyncClient(timeout=_IMG_TIMEOUT_S, headers=_IMG_HEADERS,
+                                 follow_redirects=True) as client:
+        for h in targets:
+            try:
+                h.image_path = await _hotel_image(client, h.name, city)
+            except Exception:  # noqa: BLE001 — 宣传图失败不影响评价摘要
+                h.image_path = ""
+            try:
+                h.review_digest = await _hotel_review(client, h.name, city)
+            except Exception:  # noqa: BLE001 — 评价摘要失败不影响宣传图
+                h.review_digest = ""
+
+
+async def _hotel_image(client: httpx.AsyncClient, name: str, city: str) -> str:
+    """酒店宣传图：Tavily include_images 取首个可下载的非水印候选，落盘 outputs/images。
+
+    品牌名去括号（"全季酒店（成都春熙路店）"→"全季酒店"）：全角括号实测会让检索空手而归。"""
+    base_name = name.split("（")[0].strip() or name
+    r = await client.post("https://api.tavily.com/search", json={
+        "api_key": SearchConfig.TAVILY_API_KEY,
+        "query": f"{base_name} {city} 酒店外观".strip(),
+        "max_results": 5,
+        "include_images": True,
+    })
+    r.raise_for_status()
+    imgs = r.json().get("images") or []
+    urls = [u.get("url") if isinstance(u, dict) else u for u in imgs]
+    urls = [u for u in urls if u and not any(h in urlsplit(u).netloc for h in _WATERMARK_HOSTS)]
+    logger.info("酒店宣传图检索「%s」候选 %d 张", base_name, len(urls))
+    for url in urls[:5]:
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            if len(resp.content) < 5000:
+                continue
+            path = IMAGE_DIR / ("hotel_" + hashlib.md5(f"{name}|{url}".encode()).hexdigest()[:16] + ".jpg")
+            path.write_bytes(resp.content)
+            return str(path)
+        except Exception as exc:  # noqa: BLE001 — 单候选失败换下一个
+            logger.warning("酒店宣传图下载失败（%s: %s）：%s", type(exc).__name__, exc, urlsplit(url).netloc)
+            continue
+    logger.warning("酒店宣传图「%s」全部候选不可用", base_name)
+    return ""
+
+
+async def _hotel_review(client: httpx.AsyncClient, name: str, city: str) -> str:
+    """住客评价摘要：Tavily include_answer 汇总（≤160 字），标注参考。中文提问保证中文摘要。"""
+    base_name = name.split("（")[0].strip() or name
+    r = await client.post("https://api.tavily.com/search", json={
+        "api_key": SearchConfig.TAVILY_API_KEY,
+        "query": f"{base_name} {city} 这家酒店住客评价怎么样？有什么优点和缺点？",
+        "max_results": 5,
+        "include_answer": True,
+    })
+    r.raise_for_status()
+    answer = (r.json().get("answer") or "").strip()
+    return f"{answer[:160]}（网络评价摘要，仅供参考）" if answer else ""
 
 
 async def query_hotels(city: str, location_pref: str | None, price_range: list[float] | None,
