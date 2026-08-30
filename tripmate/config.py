@@ -33,6 +33,11 @@ class LLMConfig:
     # 表现为"Agent 不及时返回 / Chatter 不回复"——失败应尽快暴露给护栏与用户。
     TIMEOUT_S: float = float(_env("LLM_TIMEOUT_S", "150"))
     MAX_RETRIES: int = int(_env("LLM_MAX_RETRIES", "1"))
+    # 次级模型：主模型调用失败（网络/限流/超时）时自动切换，恢复后自动切回。
+    # 三变量齐备才启用；未配置时行为与单模型完全一致。
+    FALLBACK_API_KEY: str = _env("LLM_FALLBACK_API_KEY")
+    FALLBACK_BASE_URL: str = _env("LLM_FALLBACK_BASE_URL")
+    FALLBACK_MODEL: str = _env("LLM_FALLBACK_MODEL")
 
 
 class SearchConfig:

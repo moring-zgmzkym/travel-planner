@@ -1,6 +1,6 @@
 # TripMate · 多 Agent 协同旅游规划系统
 
-> 实训课程大作业：基于 **AutoGen 0.4 AgentChat（SelectorGroupChat）** 的对等多 Agent 协同旅游规划系统。
+> 实训课程大作业：基于 **AutoGen 0.7.5 AgentChat（SelectorGroupChat）** 的对等多 Agent 协同旅游规划系统。
 > 一次对话式交互 → 产出 **可执行行程 PDF + 推荐订单清单**（车票/酒店已按用户要求筛选勾选）。
 
 对应企划书《旅游规划多Agent协同系统企划书.md》，文中 §x 引用均指向该文档章节。
@@ -44,7 +44,7 @@ python run.py          # 或 Windows 双击 run.bat
         │
    共享黑板 TravelProfile（版本号 + changelog + 写入串行化，§3.6）
         │
-   外部能力层：Tavily 搜索 / Wikimedia 图源 / Open-Meteo 天气 /
+   外部能力层：Tavily 搜索/图片 / Wikimedia 图源（备用） / Open-Meteo 天气 /
               高德官方 MCP / 社区 12306-MCP（全部带降级通道，§7）
 ```
 
@@ -54,12 +54,13 @@ python run.py          # 或 Windows 双击 run.bat
 | `tripmate/blackboard.py` | 共享黑板（§3.6） |
 | `tripmate/team.py` | 四 Agent 工具集 + selector 状态机 + TeamRunner（阶段/检查点/增量重跑/护栏） |
 | `tripmate/chatter.py` | 聊天 Agent（§4.1） |
+| `tripmate/llm.py` | 模型客户端工厂：主备自动故障切换（主模型失败切次级、冷却后自动切回）+ token 成本控制 |
 | `tripmate/tools/` | 搜索、图片、MCP 客户端基座、车票/酒店/天气适配层 |
 | `tripmate/planning.py` | 变更影响分析（§5.3）、预算核算（§4.5）、草稿校验（可单测纯逻辑） |
 | `tripmate/pdf_gen.py` | reportlab PDF（weasyprint 在 Windows 缺 GTK，按企划书备选方案切换） |
 | `tripmate/gateway/app.py` | FastAPI + WebSocket 网关 |
 | `static/` | 前端三件套（原生 JS） |
-| `tests/` | 16 项单测（黑板/影响分析/打分/校验/selector/PDF） |
+| `tests/` | 44 项单测（黑板/影响分析/打分/校验/selector/PDF/主备切换） |
 | `scripts/` | 端到端冒烟脚本（e2e_step1/2/3） |
 | `outputs/` | PDF 与配图产物 |
 | `logs/tripmate.log` | ReAct 审计日志（Thought→Action→Observation→产出，验收 #16 证据） |
@@ -83,9 +84,9 @@ python run.py          # 或 Windows 双击 run.bat
 
 | 依赖 | 真实通道 | 降级通道（自动，标注参考值） |
 |---|---|---|
-| LLM | 任意 OpenAI 兼容（硅基流动/千问、OpenCode Zen 等，.env 切换） | — |
+| LLM | 主：智谱 GLM（glm-5.3-flash，OpenAI 兼容 `/api/paas/v4`）；次级：OpenCode Zen 免费通道（nemotron-3.5-lightning-free，各 free 模型配额独立），主模型失败自动切换、冷却后自动切回（.env `LLM_FALLBACK_*`） | — |
 | 攻略搜索 | Tavily API（site: 限定小红书/马蜂窝） | 内置知识库结构化摘要 |
-| 图片 | Wikimedia Commons（CC 授权实拍，逐图标注来源） | PIL 本地示意卡片（标注非实景） |
+| 图片 | Tavily 图片检索（实景图，逐图标注来源域名）→ Wikimedia Commons 备用（CC 授权实拍） | PIL 本地示意卡片（标注非实景；真图/占位可混排，mode=real/mixed/mock） |
 | 天气 | Open-Meteo（免 Key 真实预报） | 模拟天气 |
 | 车票 | 社区 12306-MCP（npx stdio 拉起，Node≥18） | 模拟班次表 |
 | 酒店/距离 | 社区酒店 MCP / 高德官方 MCP（SSE） | 模拟酒店库 / 确定性参考距离 |
@@ -96,7 +97,7 @@ python run.py          # 或 Windows 双击 run.bat
 ## 测试
 
 ```bash
-python -m pytest tests/ -q          # 16 项单测
+python -m pytest tests/ -q          # 44 项单测
 python scripts/e2e_step1_chatter.py # 冒烟① Chatter 抽取与启动判定（需 LLM）
 python scripts/e2e_step2_collect.py # 冒烟② 四 Agent 协同出草稿（需 LLM）
 python scripts/e2e_step3_full.py    # 冒烟③ 中途改预算→反馈修订→确认→PDF 全流程（需 LLM）

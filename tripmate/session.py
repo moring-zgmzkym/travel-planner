@@ -18,6 +18,9 @@ RELAY_TIMEOUT_S = 180.0
 
 _BARE_TOOL = re.compile(r"^(?:start_planning|submit_draft_feedback|get_travel_profile|save_travel_info|stop_planning)\b")
 _TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args)[^>]*>", re.IGNORECASE)
+# 启动意图断言：模型可能宣布启动（中文）而未真正调用 start_planning 工具，
+# 确定性兜底需覆盖中英文两种表述（误触发无害：TeamRunner.start() 自校验三要素+运行中防重入）
+_START_INTENT = re.compile(r"启动规划|规划团队[^。]{0,8}启动|开始规划|start_planning")
 
 
 def _missed_tool_call(reply: str) -> bool:
@@ -59,7 +62,7 @@ class Session:
                     # 两轮仍文本化：不再把乱码回给用户，诚实请其重发（黑板状态未动，草稿仍待反馈）
                     AUDIT.output("Chatter", "工具调用两轮文本化，降级为请用户重发")
                     reply = "（系统提示）我这条指令没有成功执行，请把刚才的话再发一次，我会重新处理。"
-            if reply and "start_planning" in reply:
+            if reply and _START_INTENT.search(reply):
                 task = self.runner._task
                 if not self.runner.active and (task is None or task.done()):
                     receipt = self.runner.start()

@@ -236,7 +236,8 @@ def make_researcher_tools(ctx: TeamContext):
         await ctx.bb.write("images", items, "researcher", "景点配图（" + r["mode"] + "）")
         ctx.state.step = "PLAN_PDF"
         await ctx.bus.emit(AGENT_RES,
-                           f"配图完成：{len(items)} 张" + ("（本地示意配图，非实景）" if r["mode"] == "mock" else "（Wikimedia 实拍）"),
+                           f"配图完成：{len(items)} 张" + {"mock": "（本地示意配图，非实景）",
+                                                          "mixed": "（部分实拍，部分示意）"}.get(r["mode"], "（实拍图）"),
                            "STATUS_IMAGES")
         missing = [n for n in names if n not in {i.spot for i in items}]
         return _ok(status=r["mode"], images=len(items), spots=names,
