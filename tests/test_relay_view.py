@@ -136,3 +136,24 @@ def test_sender_survives_relay_crash(monkeypatch):
                 await sender
 
     asyncio.run(main())
+
+
+def test_send_failure_compensates_to_timeline():
+    """回复发送失败（socket 已断）→ 降级写入时间线，断线重连补播可见（2026-08-31 P1）。"""
+    import asyncio
+    import types
+    import tripmate.gateway.app as app
+    from tripmate.status import StatusBus
+
+    class BoomWS:
+        async def send_text(self, *_):
+            raise RuntimeError("Cannot send, closed")
+
+    sess = types.SimpleNamespace(bus=StatusBus())
+    asyncio.run(app._send(BoomWS(), {"type": "chat", "role": "chatter", "text": "回复内容ABC"}, sess))
+    evs = [e for e in sess.bus.history() if str(e.get("text", "")).startswith("（可能未送达）")]
+    assert evs and "回复内容ABC" in evs[0]["text"]
+    # 用户回显与 status 事件不触发补偿
+    asyncio.run(app._send(BoomWS(), {"type": "chat", "role": "user", "text": "x"}, sess))
+    asyncio.run(app._send(BoomWS(), {"type": "status", "kind": "STATUS_INFO", "text": "y"}, sess))
+    assert len([e for e in sess.bus.history() if str(e.get("text", "")).startswith("（可能未送达）")]) == 1

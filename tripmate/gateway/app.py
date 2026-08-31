@@ -111,12 +111,21 @@ def _orders_payload(sess: Session) -> list[dict]:
     ]
 
 
-async def _send(ws: WebSocket, payload: dict) -> None:
+async def _send(ws: WebSocket, payload: dict, sess: Session | None = None) -> None:
     try:
         await ws.send_text(event_json(payload))
     except Exception as e:  # noqa: BLE001 — 客户端断开由外层统一处理
         from ..status import AUDIT
         AUDIT.output("TeamRunner", f"WS 发送失败（{type(e).__name__}: {e}）：payload type={payload.get('type')}")
+        # 丢回复补偿（2026-08-31 实测：回复已生成但 socket 已断 → 用户零收到，而重连补播只含状态
+        # 不含聊天）：把未送达的回复降级写入时间线，断线重连后补播可见。仅补偿 chat 非用户回显，
+        # 补偿本体发送失败只会被下次 _send 吞掉，无递归。
+        if sess and payload.get("type") == "chat" and payload.get("role") != "user":
+            try:
+                text = str(payload.get("text") or "")[:120]
+                await sess.bus.emit("Chatter", f"（可能未送达）{text}", "STATUS_INFO")
+            except Exception:  # noqa: BLE001
+                pass
 
 
 async def _push_stream_error(sess: Session, text: str) -> None:
@@ -134,22 +143,23 @@ async def _handle_team_event(ws: WebSocket, sess: Session, item) -> None:
         await _send(ws, {"type": "draft", "html": _render_draft_html(sess),
                          "draft": sess.bb.profile.draft.model_dump(mode="json"),
                          "budget": compute_budget(sess.bb.profile,
-                                                  sess.bb.profile.draft)})
+                                                  sess.bb.profile.draft)}, sess)
         reply = await sess.relay_team_event(
             "规划团队已产出行程草稿（黑板 draft 分区已就绪）。请读取后向用户转述逐日概要与预算结论，"
             "并询问是否需要修改（用户可提出修改意见或确认）。")
-        await _send(ws, {"type": "chat", "role": "chatter", "text": reply})
+        await _send(ws, {"type": "chat", "role": "chatter", "text": reply}, sess)
     elif kind == "completed":
         await _send(ws, {"type": "final", "pdf_url": data.pdf_url,
                          "orders": data.order_summary,
-                         "total_price": data.total_price})
+                         "total_price": data.total_price}, sess)
+        await _send(ws, {"type": "usage", "usage": usage_summary()})  # 定稿即刷新消耗条（不等下次聊天）
         reply = await sess.relay_team_event(
             "规划团队已完成定稿（黑板 final 分区：PDF + 推荐订单清单）。请读取后向用户转述成果要点，"
             "提醒逐项确认订单并自行在官方渠道支付。")
-        await _send(ws, {"type": "chat", "role": "chatter", "text": reply})
+        await _send(ws, {"type": "chat", "role": "chatter", "text": reply}, sess)
     elif kind == "error":
         await _send(ws, {"type": "chat", "role": "system",
-                         "text": "规划团队遇到错误，请查看状态时间线或重试。"})
+                         "text": "规划团队遇到错误，请查看状态时间线或重试。"}, sess)
 
 
 async def _sender(ws: WebSocket, sess: Session) -> None:
@@ -222,21 +232,27 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 text = ("已停止当前规划任务。已收集的攻略/车票/酒店数据保留，"
                         "补充信息后可重新启动。") if receipt["status"] == "cancelled" \
                     else "当前没有进行中的规划任务。"
-                await _send(ws, {"type": "chat", "role": "system", "text": text})
+                await _send(ws, {"type": "chat", "role": "system", "text": text}, sess)
             elif kind == "chat":
                 text = (msg.get("text") or "").strip()
                 if not text:
                     continue
                 await _send(ws, {"type": "chat", "role": "user", "text": text})
+                # 即时回执：走 _sender 协程异步送达时间线（刻意不用 type=chat——前端任何
+                # 非 user 的 chat 都会解锁 busy，会诱导用户在处理中重复发送）
+                try:
+                    await sess.bus.emit("Chatter", "已收到您的消息，正在处理…", "STATUS_INFO")
+                except Exception:  # noqa: BLE001 — 回执失败不影响主流程
+                    pass
                 try:
                     reply = await sess.handle_user_message(text)
                 except Exception as e:  # noqa: BLE001 — 用户可见错误也要反馈
                     from ..status import AUDIT
                     AUDIT.output("Gateway", f"用户消息处理异常（{type(e).__name__}: {e}）")
                     reply = "（系统提示）刚才的请求没有处理成功，请稍后重试；若持续失败请重启服务。"
-                await _send(ws, {"type": "chat", "role": "chatter", "text": reply or "（无回复）"})
-                await _send(ws, {"type": "profile", "profile": sess.profile_snapshot()})
-                await _send(ws, {"type": "usage", "usage": usage_summary()})
+                await _send(ws, {"type": "chat", "role": "chatter", "text": reply or "（无回复）"}, sess)
+                await _send(ws, {"type": "profile", "profile": sess.profile_snapshot()}, sess)
+                await _send(ws, {"type": "usage", "usage": usage_summary()}, sess)
     except WebSocketDisconnect:
         pass
     finally:

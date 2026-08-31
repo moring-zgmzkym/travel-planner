@@ -78,9 +78,13 @@ class WeatherConfig:
 
 
 class BudgetConfig:
-    """成本控制（§2.3）：单次完整规划 token 上限。"""
+    """成本控制（§2.3）：单次完整规划 token 上限。
 
-    TOKEN_LIMIT: int = int(_env("TOKEN_BUDGET", "200000"))
+    2026-08-31 实测偏离企划书 §2.3 的 200K：完整流程（收集+增量重跑+修订+定稿）179K、
+    带波折 343K，200K 无法容纳一次含修订的实际任务——提额至 500K，并配合按次重置
+    （TeamRunner.start 时 reset_usage，计数语义回归"单次规划"）与群聊逐轮检查。"""
+
+    TOKEN_LIMIT: int = int(_env("TOKEN_BUDGET", "500000"))
     MAX_DRAFT_ROUNDS: int = 3          # 草稿确认循环上限（§4.5）
     MAX_ASK_ROUNDS: int = 3            # 信息追问上限（§2.1）
     MAX_TEAM_TURNS: int = 30           # 单阶段群聊轮次安全上限（风险 #5）

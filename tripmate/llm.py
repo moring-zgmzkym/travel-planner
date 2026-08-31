@@ -1,6 +1,6 @@
 """共享模型客户端工厂（§3.7：OpenAI 兼容接口，全部 Agent 经此调用）+ token 成本控制（§2.3）。
 
-五个 Agent 共享同一个客户端实例：total_usage() 聚合全局消耗，支撑 200K 上限。
+五个 Agent 共享同一个客户端实例：total_usage() 聚合全局消耗，支撑 500K 单次规划上限。
 配置次级模型（LLM_FALLBACK_* 三变量齐备）时返回主备自动切换的包装客户端：
 主模型失败（网络/限流/超时）即切次级，冷却期过后自动重探主模型、恢复即切回。
 """
@@ -260,17 +260,42 @@ def total_tokens() -> int:
     return usage.prompt_tokens + usage.completion_tokens
 
 
+# 单次规划计数基线（2026-08-31）：熔断语义为"单次完整规划"（§2.3），而底层客户端计数器
+# 进程级累计且 OpenAIChatCompletionClient 未实现 reset_usage（实测 AttributeError）——
+# 以"起点快照 + 差值"实现按次记账：TeamRunner.start() 调 reset_usage() 重新锚定。
+_usage_baseline = RequestUsage(prompt_tokens=0, completion_tokens=0)
+
+
+def reset_usage() -> None:
+    """重新锚定计数基线（TeamRunner.start 时调用），此后按差值记账本次规划消耗。"""
+    global _usage_baseline
+    _usage_baseline = (_client.total_usage() if _client is not None
+                       else RequestUsage(prompt_tokens=0, completion_tokens=0))
+
+
+def _run_usage() -> RequestUsage:
+    """本次规划（自最近一次 reset_usage 起）的消耗 = 进程累计 − 基线。"""
+    u = _client.total_usage() if _client is not None else RequestUsage(
+        prompt_tokens=0, completion_tokens=0)
+    return RequestUsage(
+        prompt_tokens=max(0, u.prompt_tokens - _usage_baseline.prompt_tokens),
+        completion_tokens=max(0, u.completion_tokens - _usage_baseline.completion_tokens),
+    )
+
+
 def check_budget() -> None:
-    if total_tokens() > BudgetConfig.TOKEN_LIMIT:
+    u = _run_usage()
+    used = u.prompt_tokens + u.completion_tokens
+    if used > BudgetConfig.TOKEN_LIMIT:
         raise TokenBudgetExceeded(
-            f"token 消耗 {total_tokens()} 已超上限 {BudgetConfig.TOKEN_LIMIT}，规划终止（§2.3 成本控制）。"
+            f"token 消耗 {used} 已超上限 {BudgetConfig.TOKEN_LIMIT}，规划终止（§2.3 成本控制）。"
         )
 
 
 def usage_summary() -> dict:
     if _client is None:
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "limit": BudgetConfig.TOKEN_LIMIT}
-    u = _client.total_usage()
+    u = _run_usage()
     return {
         "prompt_tokens": u.prompt_tokens,
         "completion_tokens": u.completion_tokens,

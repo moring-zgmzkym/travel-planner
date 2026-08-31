@@ -183,6 +183,74 @@ def test_feedback_announce_nudges_and_recovers(monkeypatch):
     assert calls["n"] == 2  # nudge 重试确实发生
 
 
+# ---- token 预算 / ETA / 崩溃抢救（2026-08-31）----
+
+def test_start_resets_usage_counter(monkeypatch):
+    """熔断语义 = 单次完整规划（§2.3）：start() 时重置进程级计数器；忙判在先不误重置。"""
+    from tripmate.team import TeamRunner as TR
+    import tripmate.team as team_mod
+    calls = []
+    monkeypatch.setattr(team_mod, "reset_usage", lambda: calls.append(1))
+
+    async def fake_phase(self, phase):
+        return None
+
+    monkeypatch.setattr(TR, "_phase_loop", fake_phase)
+    r = TR(_bb("汉中"), StatusBus())
+
+    async def main():
+        r.start()
+        await asyncio.sleep(0)
+        r.start()  # 任务已完成（stub 瞬时结束），新一轮再次重置
+        await asyncio.sleep(0)
+
+    asyncio.run(main())
+    assert calls == [1, 1]
+
+
+def test_phase_event_carries_eta(monkeypatch):
+    """STATUS_PHASE 携带 phase/eta_min 结构化字段：collect 首轮 5-10、增量重跑 5-15。"""
+    r = TeamRunner(_bb("汉中"), StatusBus())
+    r.run_id = "t"
+
+    async def fake_stream(team, task):
+        return ("ok", ["m"])
+
+    async def fake_ensure(ctx, phase, texts):
+        return None
+
+    monkeypatch.setattr(r, "_build_team", lambda ctx, phase: object())
+    monkeypatch.setattr(r, "_stream_team", fake_stream)
+    monkeypatch.setattr(r, "_ensure_sections", fake_ensure)
+    asyncio.run(r._run_phase("collect"))
+    asyncio.run(r._run_phase("collect", changed_fields=["budget"]))
+    phases = [e for e in r.bus.history() if e.get("kind") == "STATUS_PHASE"]
+    assert phases[0]["phase"] == "collect" and phases[0]["eta_min"] == [5, 10]
+    assert phases[1]["eta_min"] == [5, 15]  # 增量重跑区间更宽
+    assert r._phase_started > 0  # 心跳锚点存在且被重置
+
+
+def test_phase_crash_rescues_draft_delivery(monkeypatch):
+    """阶段崩溃但黑板已有草稿 → 补发 on_draft_ready（防草稿卡片+转述蒸发）。"""
+    from tripmate.models import Draft, DraftDay
+    bb = _bb("汉中")
+    r = TeamRunner(bb, StatusBus())
+    r.run_id = "t"
+    delivered = []
+    r.on_draft_ready = lambda d: delivered.append(d)
+
+    async def boom(phase, changed_fields=None):
+        await bb.write("draft", Draft(days=[DraftDay(
+            date="2026-10-01", morning="m", afternoon="a", evening="e", spots=["s"])],
+            budget_total=1.0), "planner", "测试草稿")
+        raise RuntimeError("模拟阶段崩溃")
+
+    monkeypatch.setattr(r, "_run_phase", boom)
+    asyncio.run(r._phase_loop("collect"))
+    assert len(delivered) == 1 and r._awaiting_feedback  # 草稿已抢救送达
+    assert any(e.get("kind") == "STATUS_ERROR" for e in r.bus.history())  # 错误仍上报
+
+
 # ---- start() 黑板清理（问题 1 回归）----
 
 def test_start_clears_stale_run_same_destination(monkeypatch):

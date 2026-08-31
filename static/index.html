@@ -30,7 +30,7 @@
     <div class="panel">
       <div class="panel-title">📊 Token 消耗</div>
       <div class="usage-bar"><div class="usage-fill" id="usage-fill"></div></div>
-      <div class="usage-text" id="usage-text">0 / 200K</div>
+      <div class="usage-text" id="usage-text">0 / 500K</div>
     </div>
   </aside>
 
@@ -49,6 +49,7 @@
         <span class="agent-chip" data-agent="TeamRunner">⚙ 调度器</span>
       </div>
       <div class="head-right">
+        <span class="agent-chip" id="eta-chip" style="display:none" title="基于实测耗时的预计等待时间"></span>
         <button id="stop-plan" title="停止当前规划任务（已收集数据保留）">⏹ 停止规划</button>
         <div class="conn-dot" id="conn-dot"></div>
       </div>

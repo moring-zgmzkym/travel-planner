@@ -244,6 +244,8 @@ async def stream_chatter(chatter: AssistantAgent, user_text: str, source: str = 
             AUDIT.observation("Chatter", obs)
         elif isinstance(msg, BaseChatMessage) and not isinstance(msg, BaseAgentEvent):
             if msg.source != "user":
-                last = clean_reply(msg.to_text(), fallback="已处理您的消息。")
+                # 不给非空 fallback：清洗后为空就该走 session 的空回复 nudge，
+                # 用"已处理您的消息。"搪塞只会掩蔽问题、让兜底链失效
+                last = clean_reply(msg.to_text())
                 AUDIT.output("Chatter", last)
     return last

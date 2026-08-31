@@ -15,8 +15,9 @@ from .config import ServerConfig
 # 转述调用超时上限（秒）：免费 LLM 通道限流时 openai 客户端会静默重试很久，
 # 不设上限会占死 chatter_lock，并曾异常冒泡烧掉网关推送协程（2026-08-29 诊断）。
 RELAY_TIMEOUT_S = 180.0
-# 用户消息处理超时（秒）：主备两客户端最坏路径 ~360s，420s 留余量；超时重建 Chatter 丢弃污染上下文。
-CHAT_TIMEOUT_S = 420.0
+# 用户消息处理超时（秒）：主备两客户端最坏路径 ~450s（主 150+备 300），480s 留余量；
+# 低于最坏值会在拥堵窗口把"本可完成的回复"误杀成"处理超时请重发"。超时重建 Chatter 丢弃污染上下文。
+CHAT_TIMEOUT_S = 480.0
 
 _BARE_TOOL = re.compile(r"^(?:start_planning|submit_draft_feedback|get_travel_profile|save_travel_info|stop_planning)\b")
 _TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args)[^>]*>", re.IGNORECASE)
@@ -79,9 +80,14 @@ class Session:
             if _missed_tool_call(reply):
                 nudge = ("你上一条回复想调用的工具被序列化成了文字，没有真正执行。"
                          "请立即通过工具调用通道真正执行该工具，然后给用户一句简短的自然语言回复。")
-                reply2 = await asyncio.wait_for(
-                    stream_chatter(self.chatter, nudge, source="system", seen_tools=tools_seen),
-                    timeout=CHAT_TIMEOUT_S)
+                try:
+                    reply2 = await asyncio.wait_for(
+                        stream_chatter(self.chatter, nudge, source="system", seen_tools=tools_seen),
+                        timeout=CHAT_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    AUDIT.output("Chatter", "nudge 补试超时，重建 Chatter 丢弃污染上下文")
+                    self.chatter = build_chatter(self.bb, self.bus, self.runner)
+                    reply2 = ""
                 if reply2 and not _missed_tool_call(reply2):
                     reply = reply2
                 else:
@@ -91,12 +97,17 @@ class Session:
             if not (reply or "").strip():
                 # 空回复治理（2026-08-30 用户反馈：话只进了审计日志、聊天页无输出）：补一轮总结
                 AUDIT.output("Chatter", "回复为空，nudge 补一轮自然语言总结")
-                reply = await asyncio.wait_for(
-                    stream_chatter(self.chatter,
-                                   "请用一两句自然的中文告诉用户当前进展，以及接下来需要用户做什么。"
-                                   "不要提任何内部术语。",
-                                   source="system", seen_tools=tools_seen),
-                    timeout=CHAT_TIMEOUT_S)
+                try:
+                    reply = await asyncio.wait_for(
+                        stream_chatter(self.chatter,
+                                       "请用一两句自然的中文告诉用户当前进展，以及接下来需要用户做什么。"
+                                       "不要提任何内部术语。",
+                                       source="system", seen_tools=tools_seen),
+                        timeout=CHAT_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    AUDIT.output("Chatter", "空回复总结超时，重建 Chatter 丢弃污染上下文")
+                    self.chatter = build_chatter(self.bb, self.bus, self.runner)
+                    reply = ""
                 reply = (reply or "").strip() or "我正在处理您的请求，请稍候；如有需要我会随时与您确认。"
             # 工具本轮已真正执行过时跳过兜底：回执即启动确认，避免对成功路径二次干预/重复启动
             if reply and "start_planning" not in tools_seen and _START_INTENT.search(reply):
@@ -122,14 +133,19 @@ class Session:
                     and (_fb_task is None or _fb_task.done()) and self.runner._awaiting_feedback
                     and self.bb.profile.draft and _FEEDBACK_INTENT.search(reply)):
                 AUDIT.output("Chatter", "回复宣称已提交修改意见但工具未执行，nudge 重试")
-                reply2 = await asyncio.wait_for(
-                    stream_chatter(self.chatter,
-                                   "你上一条回复声称已把修改意见转给规划团队，但没有真正调用 submit_draft_feedback "
-                                   "工具，修改意见并未提交。请立即通过 submit_draft_feedback 工具真正提交：feedback "
-                                   "取用户本轮消息里的修改意见原文、confirmed=false（用户明确说确认草稿才是 true），"
-                                   "然后给用户一句简短的自然语言回复。",
-                                   source="system", seen_tools=tools_seen),
-                    timeout=CHAT_TIMEOUT_S)
+                try:
+                    reply2 = await asyncio.wait_for(
+                        stream_chatter(self.chatter,
+                                       "你上一条回复声称已把修改意见转给规划团队，但没有真正调用 submit_draft_feedback "
+                                       "工具，修改意见并未提交。请立即通过 submit_draft_feedback 工具真正提交：feedback "
+                                       "取用户本轮消息里的修改意见原文、confirmed=false（用户明确说确认草稿才是 true），"
+                                       "然后给用户一句简短的自然语言回复。",
+                                       source="system", seen_tools=tools_seen),
+                        timeout=CHAT_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    AUDIT.output("Chatter", "反馈 nudge 超时，重建 Chatter 丢弃污染上下文")
+                    self.chatter = build_chatter(self.bb, self.bus, self.runner)
+                    reply2 = ""
                 if reply2 and "submit_draft_feedback" in tools_seen:
                     reply = reply2
                 else:
@@ -150,12 +166,14 @@ class Session:
                 return await stream_chatter(self.chatter, f"[系统提示·请转述给用户] {note}", source="system")
 
         try:
-            return await asyncio.wait_for(_do(), timeout=RELAY_TIMEOUT_S)
+            out = await asyncio.wait_for(_do(), timeout=RELAY_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 — 转述失败必须降级，不能影响主推送链路
             AUDIT.output("Chatter", f"转述降级：{type(e).__name__}: {e}")
             # 超时取消会在 Chatter 上下文里留下无回应的转述请求，重建实例丢弃污染上下文
             self.chatter = build_chatter(self.bb, self.bus, self.runner)
             return "成果已通过界面卡片发送，可随时向我询问详情；本次语音转述暂时不可用。"
+        # 空转述守卫（clean_reply 去掉非空 fallback 后可能返回空串，防前端空气泡）
+        return out if (out or "").strip() else "成果已通过界面卡片发送，可随时向我询问详情。"
 
     def profile_snapshot(self) -> dict:
         data = self.bb.profile.model_dump(mode="json")

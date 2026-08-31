@@ -10,6 +10,7 @@ let busyTimer = null;
 let busy = false; // Chatter 处理中（等待回复期间禁止重复发送）
 let reconnected = false; // 是否发生过断线重连（首页首连不提示）
 let sid = localStorage.getItem("tm_sid") || "default"; // 当前会话（需求 2 对话管理）
+let etaRange = null; // 当前阶段预计耗时 [下限, 上限] 分钟（STATUS_PHASE 锚定）
 
 const AGENT_NAMES = {
   Chatter: "聊天管家", InformationProcessor: "信息处理", Researcher: "信息收集",
@@ -73,6 +74,7 @@ function switchSession(nextSid) {
   div.textContent = "已切换对话。该对话的规划进展与成果如下方所示（历史消息不跨对话保留）。";
   $("chat").appendChild(div);
   $("timeline").innerHTML = "";
+  hideEtaChip(); // 新会话无运行中阶段
   setBusy(false);
   if (ws) ws.close(); // onclose 自动以新 sid 重连，服务端补播该会话状态
 }
@@ -97,6 +99,7 @@ function handleMsg(m) {
   if (m.type === "status" || m.type === "AGENT_MESSAGE") {
     addTimeline(m.agent, m.kind || m.type, m.text);
     flashAgent(m.agent);
+    updateEtaChip(m);
   } else if (m.type === "chat") {
     if (m.role === "user") return; // 客户端已乐观渲染，跳过回显
     addChat(m.role, m.text);
@@ -106,6 +109,7 @@ function handleMsg(m) {
   } else if (m.type === "final") {
     addFinal(m);
     renderOrders(m.orders, m.total_price);
+    hideEtaChip(); // 成品已到达，预计等待结束
   } else if (m.type === "profile") {
     renderProfile(m.profile);
   } else if (m.type === "usage") {
@@ -191,7 +195,7 @@ function renderOrders(orders, total) {
 
 function renderUsage(u) {
   if (!u) return;
-  const pct = Math.min(100, (u.total_tokens / (u.limit || 200000)) * 100);
+  const pct = Math.min(100, (u.total_tokens / (u.limit || 500000)) * 100);
   $("usage-fill").style.width = pct + "%";
   $("usage-text").textContent = `${u.total_tokens.toLocaleString()} / ${(u.limit / 1000) + "K"}（${pct.toFixed(1)}%）`;
 }
@@ -203,6 +207,30 @@ function flashAgent(name) {
   clearTimeout(chip._t);
   // 35s 熄灭（> 服务端 30s 心跳 HEARTBEAT_S）：团队运行期间心跳持续续亮，徽章不闪灭
   chip._t = setTimeout(() => chip.classList.remove("on"), 35000);
+}
+
+/* ETA chip：STATUS_PHASE（含检查点重跑）锚定预计区间，STATUS_PROGRESS 刷新已进行，
+   终态（完成/停止/错误）或成品卡片到达即隐藏。chatter 的 STATUS_PHASE 无 eta 字段，容忍缺失。 */
+function updateEtaChip(m) {
+  const chip = $("eta-chip");
+  if (!chip) return;
+  if (m.kind === "STATUS_COMPLETED" || m.kind === "STATUS_CANCELLED" || m.kind === "STATUS_ERROR") {
+    etaRange = null;
+    chip.style.display = "none";
+    return;
+  }
+  if (Array.isArray(m.eta_min)) etaRange = m.eta_min;
+  if (!etaRange) return;
+  const elapsedMin = typeof m.elapsed_s === "number" ? Math.round(m.elapsed_s / 60) : null;
+  const etaText = etaRange[0] === etaRange[1] ? `约 ${etaRange[0]} 分钟` : `${etaRange[0]}-${etaRange[1]} 分钟`;
+  chip.textContent = `⏱ 预计 ${etaText}` + (elapsedMin !== null ? ` · 已进行 ${elapsedMin} 分` : "");
+  chip.style.display = "";
+}
+
+function hideEtaChip() {
+  etaRange = null;
+  const chip = $("eta-chip");
+  if (chip) chip.style.display = "none";
 }
 
 function setBusy(v) {

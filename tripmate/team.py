@@ -24,7 +24,7 @@ from autogen_agentchat.teams import SelectorGroupChat
 from . import prompts
 from .blackboard import Blackboard
 from .config import BudgetConfig, ServerConfig
-from .llm import TokenBudgetExceeded, check_budget, get_model_client
+from .llm import TokenBudgetExceeded, check_budget, get_model_client, reset_usage
 from .mocks.data import kb_for_city
 from .models import (Draft, DraftDay, DraftFeedback, FinalDelivery, GuideDigestItem,
                      HotelCandidate, ImageItem, PlanInput, TicketCandidate, TravelProfile)
@@ -529,6 +529,7 @@ class TeamRunner:
             return {"status": "rejected", "reason": f"画像缺少不可默认字段：{'、'.join(missing)}"}
         if self.active and self._task and not self._task.done():
             return {"status": "rejected", "reason": "团队正在运行中，请等待当前阶段完成"}
+        reset_usage()  # 熔断语义为"单次完整规划"（§2.3）：计数器本体进程级累计，新一轮规划起算
         self.run_id = uuid.uuid4().hex
         # 新一轮规划边界：清空上一轮 run 作用域残留（§4.5 闭环后再次规划的场景）。
         # 成品/草稿必清（否则 has_draft 恒 true 会把新请求拖进草稿反馈语义）；
@@ -606,19 +607,20 @@ class TeamRunner:
     async def _heartbeat(self, phase: str) -> None:
         """长任务静默期心跳：单次 LLM/工具调用可静默数分钟，期间无任何状态事件，
         前端徽章（亮约 35s 后熄）与时间线会"看起来停了"。周期发 STATUS_PROGRESS
-        维持运行中的可视状态（§6 状态推送，间隔 ServerConfig.HEARTBEAT_S）。"""
+        （附 phase/elapsed_s 结构化字段，供前端"已进行/预计"对比；间隔 ServerConfig.HEARTBEAT_S）。"""
         interval = ServerConfig.HEARTBEAT_S
-        n = 0
+        loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(interval)
-            n += 1
+            elapsed = int(loop.time() - self._phase_started)
             await self.bus.emit("TeamRunner",
-                                f"团队仍在运行：{phase} 阶段已进行约 {int(n * interval)} 秒"
+                                f"团队仍在运行：{phase} 阶段已进行约 {elapsed} 秒"
                                 "（搜索/比价/行程生成等长耗时步骤仍在后台进行）",
-                                "STATUS_PROGRESS")
+                                "STATUS_PROGRESS", phase=phase, elapsed_s=elapsed)
 
     async def _phase_loop(self, phase: str, changed_fields: list[str] | None = None) -> None:
         async with self._lock:
+            self._phase_started = asyncio.get_running_loop().time()
             hb = asyncio.create_task(self._heartbeat(phase))
             try:
                 check_budget()
@@ -661,17 +663,41 @@ class TeamRunner:
                         self.on_completed(final)
             except TokenBudgetExceeded as e:
                 self.active = False
+                # 预算已死：待反馈态复位（隐患修正）——不做崩溃抢救，防"提交反馈→再熔断"死循环
+                self._awaiting_feedback = False
                 await self.bus.emit("TeamRunner", f"成本控制：{e}", "STATUS_ERROR")
                 if self.on_error:
                     self.on_error(str(e))
             except Exception as e:  # noqa: BLE001 — 后台任务统一兜底
                 self.active = False
+                # 崩溃抢救（2026-08-31 实测：草稿已产出但阶段崩溃时交付事件不触发，
+                # 草稿卡片与 Chatter 转述整体蒸发——用户视角即"Chatter 不回复"）
+                await self._rescue_deliverables(phase)
                 AUDIT.output("TeamRunner", f"阶段运行异常：{type(e).__name__}: {e}")
                 await self.bus.emit("TeamRunner", f"规划团队运行异常：{e}", "STATUS_ERROR")
                 if self.on_error:
                     self.on_error(str(e))
             finally:
                 hb.cancel()
+
+    async def _rescue_deliverables(self, phase: str) -> None:
+        """阶段异常兜底交付：黑板已有草稿/成品但交付事件未触发时补发（防成果蒸发）。
+
+        仅 generic 异常路径调用（预算熔断走重新规划，不做抢救）。已交付过（_awaiting_feedback
+        为真）时不重发，避免重复卡片；抢救自身绝不叠加新异常。"""
+        try:
+            if phase in ("collect", "revise"):
+                draft = self.bb.profile.draft
+                if draft and not self._awaiting_feedback:
+                    self._awaiting_feedback = True
+                    if self.on_draft_ready:
+                        self.on_draft_ready(draft)
+            elif phase == "finalize":
+                final = self.bb.profile.final
+                if final and self.on_completed:
+                    self.on_completed(final)
+        except Exception:  # noqa: BLE001
+            AUDIT.output("TeamRunner", "崩溃抢救交付失败（不影响错误上报）")
 
     async def _run_phase(self, phase: str, changed_fields: list[str] | None = None) -> None:
         # 变更影响分析 → 通道复用开关（§5.3：只重跑受影响环节）
@@ -696,11 +722,16 @@ class TeamRunner:
                           runner=self, run_id=self.run_id, reuse=reuse)
         team = self._build_team(ctx, phase)
         task_text = self._phase_task(phase, changed_fields)
+        # 阶段锚点：每次 _run_phase 重置（检查点重跑也重新起算），心跳 elapsed 与前端 ETA 对比才不失真
+        self._phase_started = asyncio.get_running_loop().time()
+        # ETA（2026-08-31 实测分布）：collect 首轮 5-10 分、增量重跑 5-15 分、revise 1-3 分、finalize 1-2 分
+        eta = {"collect": (5, 15) if changed_fields else (5, 10),
+               "revise": (1, 3), "finalize": (1, 2)}[phase]
         await self.bus.emit("TeamRunner",
                             {"collect": "规划团队启动（信息处理/信息收集/MCP 专项/计划规划 四 Agent 对等协同）",
                              "revise": f"草稿修订（第 {self._draft_rounds} 轮）",
                              "finalize": "草稿已确认，进入定稿流程（配图 + PDF）"}[phase],
-                            "STATUS_PHASE")
+                            "STATUS_PHASE", phase=phase, eta_min=list(eta))
         result_text, all_texts = await self._stream_team(team, task_text)
         # 确定性护栏：阶段结束以黑板为准，缺失分区直接补齐（LLM 协议执行不完美时的可靠性兜底）
         await self._ensure_sections(ctx, phase, all_texts)
@@ -951,6 +982,7 @@ class TeamRunner:
         texts: list[str] = []
         stream = team.run_stream(task=task_text)
         while True:
+            check_budget()  # 逐轮检查：溢出幅度收敛到 ≤单轮（原只查阶段入口，实测超限 71% 才停）
             try:
                 msg = await stream.__anext__()
             except StopAsyncIteration:
