@@ -23,7 +23,7 @@ from autogen_agentchat.teams import SelectorGroupChat
 
 from . import prompts
 from .blackboard import Blackboard
-from .config import BudgetConfig
+from .config import BudgetConfig, ServerConfig
 from .llm import TokenBudgetExceeded, check_budget, get_model_client
 from .mocks.data import kb_for_city
 from .models import (Draft, DraftDay, DraftFeedback, FinalDelivery, GuideDigestItem,
@@ -186,7 +186,7 @@ def make_researcher_tools(ctx: TeamContext):
         也可传入整理裁剪后的 JSON 数组（保留 source_name/source_url/fetched_at/spots/foods/routes/warnings 字段）。
         写入成功后回复以「SEARCH_RESULT」开头。"""
         if ctx.reuse.get("guides") and ctx.bb.profile.guide_digest:
-            ctx.state.step = "PROC_SUMMARIZE"
+            ctx.state.step = "MCP_COLLECT"
             return _ok(status="reused", note="攻略复用缓存，无需结构化",
                        sources=len(ctx.bb.profile.guide_digest))
         if not ctx.jobs.has("guides"):
@@ -208,10 +208,13 @@ def make_researcher_tools(ctx: TeamContext):
             except Exception:
                 continue
         if not items:
-            ctx.state.step = "PROC_SUMMARIZE"
+            ctx.state.step = "MCP_COLLECT"
             return _ok(status="error", error="没有可用的攻略条目（原始结果也为空），攻略分区将由系统护栏补齐")
         await ctx.bb.write("guide_digest", items, "researcher", "攻略搜索结构化摘要")
-        ctx.state.step = "PROC_SUMMARIZE"
+        # 攻略收割完成 → 交棒 MCP 收割（§3.4 交错协议：双方收割完才汇总）。
+        # 此前直跳 PROC_SUMMARIZE 会导致 BookingButler 永远轮不到收割回合——选择器唯一能
+        # 点名它的路径是"Researcher 空转"兜底，Researcher 越成功越收不到订单数据（2026-08-31 e2e 实测死锁）。
+        ctx.state.step = "MCP_COLLECT"
         spots = sorted({s for g in items for s in g.spots})[:10]
         AUDIT.observation(AGENT_RES, f"guide_digest 写入 {len(items)} 条")
         return _ok(status="written", sources=len(items), spots=spots,
@@ -455,7 +458,10 @@ async def _deliver_final(ctx: TeamContext) -> str:
     prof: TravelProfile = ctx.bb.profile
     if not prof.draft:
         return _ok(status="error", error="黑板无草稿")
-    path = build_pdf(prof, ctx.run_id)
+    path = await asyncio.to_thread(
+        build_pdf, prof.model_copy(deep=True), ctx.run_id)
+    # to_thread：reportlab 渲染是同步重活，内联执行会冻结整个事件循环（所有会话的推送全停摆）；
+    # 深拷贝快照隔离渲染期间的用户并发写黑板（阻塞版的隐含串行安全性随线程化消失）
     orders = []
     total = 0.0
     party = prof.detail_info.party_size or prof.basic_info.party_size or 1
@@ -597,8 +603,23 @@ class TeamRunner:
         return
 
     # ---- 阶段循环 ----
+    async def _heartbeat(self, phase: str) -> None:
+        """长任务静默期心跳：单次 LLM/工具调用可静默数分钟，期间无任何状态事件，
+        前端徽章（亮约 35s 后熄）与时间线会"看起来停了"。周期发 STATUS_PROGRESS
+        维持运行中的可视状态（§6 状态推送，间隔 ServerConfig.HEARTBEAT_S）。"""
+        interval = ServerConfig.HEARTBEAT_S
+        n = 0
+        while True:
+            await asyncio.sleep(interval)
+            n += 1
+            await self.bus.emit("TeamRunner",
+                                f"团队仍在运行：{phase} 阶段已进行约 {int(n * interval)} 秒"
+                                "（搜索/比价/行程生成等长耗时步骤仍在后台进行）",
+                                "STATUS_PROGRESS")
+
     async def _phase_loop(self, phase: str, changed_fields: list[str] | None = None) -> None:
         async with self._lock:
+            hb = asyncio.create_task(self._heartbeat(phase))
             try:
                 check_budget()
                 await self._run_phase(phase, changed_fields)
@@ -649,6 +670,8 @@ class TeamRunner:
                 await self.bus.emit("TeamRunner", f"规划团队运行异常：{e}", "STATUS_ERROR")
                 if self.on_error:
                     self.on_error(str(e))
+            finally:
+                hb.cancel()
 
     async def _run_phase(self, phase: str, changed_fields: list[str] | None = None) -> None:
         # 变更影响分析 → 通道复用开关（§5.3：只重跑受影响环节）

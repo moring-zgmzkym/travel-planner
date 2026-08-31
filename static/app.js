@@ -201,7 +201,8 @@ function flashAgent(name) {
   if (!chip) return;
   chip.classList.add("on");
   clearTimeout(chip._t);
-  chip._t = setTimeout(() => chip.classList.remove("on"), 4000);
+  // 35s 熄灭（> 服务端 30s 心跳 HEARTBEAT_S）：团队运行期间心跳持续续亮，徽章不闪灭
+  chip._t = setTimeout(() => chip.classList.remove("on"), 35000);
 }
 
 function setBusy(v) {

@@ -13,8 +13,8 @@ USER_INPUT = ("帮我规划十一成都 3 天游，10 月 1 号从上海出发�
               "必去大熊猫基地。")
 
 
-async def wait_draft(s: Session, timeout_s: int = 600) -> bool:
-    """等待草稿就绪（阶段循环 + 护栏结束的准确信号；600s 预算含一次主模型故障切换的时间）。"""
+async def wait_draft(s: Session, timeout_s: int = 1500) -> bool:
+    """等待草稿就绪（阶段循环 + 护栏结束的准确信号；1500s 预算：含主备故障切换与中途修改检查点增量重跑（2026-08-31 慢通道实测需 >600s））。"""
     while True:
         try:
             kind, data = await asyncio.wait_for(s.team_events.get(), timeout=timeout_s)
@@ -28,7 +28,7 @@ async def wait_draft(s: Session, timeout_s: int = 600) -> bool:
             return False
 
 
-async def wait_final(s: Session, timeout_s: int = 600) -> bool:
+async def wait_final(s: Session, timeout_s: int = 1500) -> bool:
     while True:
         try:
             kind, data = await asyncio.wait_for(s.team_events.get(), timeout=timeout_s)

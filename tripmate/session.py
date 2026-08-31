@@ -21,8 +21,20 @@ CHAT_TIMEOUT_S = 420.0
 _BARE_TOOL = re.compile(r"^(?:start_planning|submit_draft_feedback|get_travel_profile|save_travel_info|stop_planning)\b")
 _TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args)[^>]*>", re.IGNORECASE)
 # 启动意图断言：模型可能宣布启动（中文）而未真正调用 start_planning 工具，
-# 确定性兜底需覆盖中英文多种表述（"启动新一轮规划"为实测漏接变体，2026-08-30）。
-_START_INTENT = re.compile(r"启动(新一轮)?(规划|规划团队)|规划团队[^。]{0,8}启动|开始规划|start_planning")
+# 确定性兜底需覆盖中英文多种表述（"启动新一轮规划"为 2026-08-30 实测漏接变体；
+# "现在开始为您规划"等带称呼语的插入变体为 2026-08-31 实测漏接变体——兜底未命中导致
+# 团队从未启动，状态面板全程无事件）。负向断言排除"再/后/别/不/未/没/暂"等延迟拒绝语义；
+# 声明跨度内禁跨句（！？），防止把下一句的打算误当成启动宣言。
+_START_INTENT = re.compile(
+    r"(?<![不别未勿再后没暂])(?:开始|启动)[^。！？]{0,8}规划"
+    r"|规划团队[^。！？]{0,8}(?<![不别未勿再后没暂])启动"
+    r"|start_planning")
+# 反馈提交意图断言：草稿待反馈期模型可能宣布"已把修改意见转给团队"而不真正调用
+# submit_draft_feedback（2026-08-31 完整流程实测两种变体："把这条修改意见转给规划团队"、
+# "我来提交给规划团队"——宣布后团队闲置，修订流程卡死）。
+_FEEDBACK_INTENT = re.compile(
+    r"(?:转给|提交给|反馈给|转达给)(?:规划)?团队"
+    r"|(?:修改意见|反馈|意见)[^。！？]{0,6}(?:已)?(?:提交|转达)(?:给)?(?:规划)?团队")
 
 
 def _missed_tool_call(reply: str) -> bool:
@@ -55,9 +67,11 @@ class Session:
         回复含启动意图且画像齐备时确定性补启动；**画像不齐时保留 Chatter 的追问原文**（信息不全时
         该回复本就是追问，绝不用启动失败的内部术语文案覆盖它，2026-08-30 用户体验事故）。
         """
+        tools_seen: set[str] = set()  # 本轮真正执行过的工具名（判定"宣布启动但工具未执行"）
         async with self.chatter_lock:
             try:
-                reply = await asyncio.wait_for(stream_chatter(self.chatter, text), timeout=CHAT_TIMEOUT_S)
+                reply = await asyncio.wait_for(
+                    stream_chatter(self.chatter, text, seen_tools=tools_seen), timeout=CHAT_TIMEOUT_S)
             except asyncio.TimeoutError:
                 AUDIT.output("Chatter", f"用户消息处理超过 {int(CHAT_TIMEOUT_S)}s，重建 Chatter 实例丢弃污染上下文")
                 self.chatter = build_chatter(self.bb, self.bus, self.runner)
@@ -66,7 +80,8 @@ class Session:
                 nudge = ("你上一条回复想调用的工具被序列化成了文字，没有真正执行。"
                          "请立即通过工具调用通道真正执行该工具，然后给用户一句简短的自然语言回复。")
                 reply2 = await asyncio.wait_for(
-                    stream_chatter(self.chatter, nudge, source="system"), timeout=CHAT_TIMEOUT_S)
+                    stream_chatter(self.chatter, nudge, source="system", seen_tools=tools_seen),
+                    timeout=CHAT_TIMEOUT_S)
                 if reply2 and not _missed_tool_call(reply2):
                     reply = reply2
                 else:
@@ -80,10 +95,11 @@ class Session:
                     stream_chatter(self.chatter,
                                    "请用一两句自然的中文告诉用户当前进展，以及接下来需要用户做什么。"
                                    "不要提任何内部术语。",
-                                   source="system"),
+                                   source="system", seen_tools=tools_seen),
                     timeout=CHAT_TIMEOUT_S)
                 reply = (reply or "").strip() or "我正在处理您的请求，请稍候；如有需要我会随时与您确认。"
-            if reply and _START_INTENT.search(reply):
+            # 工具本轮已真正执行过时跳过兜底：回执即启动确认，避免对成功路径二次干预/重复启动
+            if reply and "start_planning" not in tools_seen and _START_INTENT.search(reply):
                 missing = self.bb.profile.basic_info.missing_required()
                 if missing:
                     # 信息不全：这条回复是礼貌追问而非启动宣言，原样放行，绝不覆盖
@@ -98,6 +114,27 @@ class Session:
                                      "规划期间您可以继续补充或修改信息，草稿出来后我会请您确认。")
                         else:
                             reply = "规划团队暂时忙碌，您可以继续补充信息，稍后再告诉我开始规划。"
+            # 兜底修复 3：草稿待反馈期，模型宣布"已把修改意见转给团队"但未真正调用工具
+            # （判闲与 submit_feedback 同源：_task 完成，而非 active 标志——collect 出草稿后
+            # active 仍为 True；工具未执行 + 待反馈才触发；nudge 一轮强制真调，失败诚实请用户重发）
+            _fb_task = self.runner._task
+            if (reply and "submit_draft_feedback" not in tools_seen
+                    and (_fb_task is None or _fb_task.done()) and self.runner._awaiting_feedback
+                    and self.bb.profile.draft and _FEEDBACK_INTENT.search(reply)):
+                AUDIT.output("Chatter", "回复宣称已提交修改意见但工具未执行，nudge 重试")
+                reply2 = await asyncio.wait_for(
+                    stream_chatter(self.chatter,
+                                   "你上一条回复声称已把修改意见转给规划团队，但没有真正调用 submit_draft_feedback "
+                                   "工具，修改意见并未提交。请立即通过 submit_draft_feedback 工具真正提交：feedback "
+                                   "取用户本轮消息里的修改意见原文、confirmed=false（用户明确说确认草稿才是 true），"
+                                   "然后给用户一句简短的自然语言回复。",
+                                   source="system", seen_tools=tools_seen),
+                    timeout=CHAT_TIMEOUT_S)
+                if reply2 and "submit_draft_feedback" in tools_seen:
+                    reply = reply2
+                else:
+                    AUDIT.output("Chatter", "修改意见两轮未真正提交，降级为请用户重发")
+                    reply = "（系统提示）刚才的修改意见没有成功提交，请把它再发一次，我会立即转给规划团队。"
             return reply
 
     async def relay_team_event(self, note: str) -> str:

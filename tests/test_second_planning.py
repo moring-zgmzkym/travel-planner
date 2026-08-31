@@ -10,7 +10,7 @@ import pytest
 from tripmate.blackboard import Blackboard
 from tripmate.models import (BasicInfo, DetailInfo, Draft, DraftDay, GuideDigestItem,
                              HotelCandidate, ImageItem, TicketCandidate)
-from tripmate.session import Session, _START_INTENT
+from tripmate.session import Session, _FEEDBACK_INTENT, _START_INTENT
 from tripmate.status import StatusBus
 from tripmate.team import TeamRunner
 
@@ -48,7 +48,7 @@ def _stale_run(bb: Blackboard, destination: str) -> None:
 def _make_session(bb: Blackboard, monkeypatch, chatter_reply: str) -> Session:
     """构造绕过真实 LLM 的 Session：stream_chatter 返回固定回复，团队阶段循环置空。"""
 
-    async def fake_stream(chatter, text, source="user"):
+    async def fake_stream(chatter, text, source="user", seen_tools=None):
         return chatter_reply
 
     async def fake_phase(self, phase):
@@ -75,6 +75,13 @@ def test_start_intent_regex_variants():
     assert _START_INTENT.search("start_planning")
     assert _START_INTENT.search("规划团队已在后台启动")
     assert not _START_INTENT.search("请问您从哪里出发呢？")  # 普通追问不误命中
+    # 2026-08-31 实测漏接变体：称呼语插在"开始"与"规划"之间，团队从未启动、面板全程无事件
+    assert _START_INTENT.search("已记下您的需求，现在开始为您规划。")
+    assert _START_INTENT.search("需求已记好，现在开始为您规划。")
+    # 延迟/拒绝语义不得误命中（否则用户明确说"先别开始"也会被兜底启动）
+    assert not _START_INTENT.search("等您确认后再开始规划。")
+    assert not _START_INTENT.search("先别开始规划，我还没想好。")
+    assert not _START_INTENT.search("规划团队还没启动，请稍候。")
 
 
 # ---- 缺字段闸门（问题 2 回归）----
@@ -97,6 +104,83 @@ def test_complete_profile_deterministic_start_fires(monkeypatch):
     reply = asyncio.run(s.handle_user_message("帮我规划汉中3天"))
     assert reply.startswith("信息已齐备，旅行规划团队已在后台启动")
     assert s.runner.active  # 确定性启动已受理
+
+
+def test_incident_variant_announce_starts_team(monkeypatch):
+    """2026-08-31 事故回归：回复宣布"现在开始为您规划"（称呼语插入变体）但工具未执行 → 确定性补启动。"""
+    bb = _bb("汉中")
+    s = _make_session(bb, monkeypatch, "已记下您的需求，现在开始为您规划。")
+    reply = asyncio.run(s.handle_user_message("帮我规划汉中3天"))
+    assert reply.startswith("信息已齐备，旅行规划团队已在后台启动")
+    assert s.runner.active
+
+
+def test_tool_actually_executed_skips_fallback(monkeypatch):
+    """工具本轮已真正执行（start_planning 出现在执行事件中）：回执即启动确认，兜底绝不二次干预。"""
+    bb = _bb("汉中")
+
+    async def fake_stream(chatter, text, source="user", seen_tools=None):
+        if seen_tools is not None:
+            seen_tools.add("start_planning")
+        return "已启动旅行规划团队（后台运行，您可继续补充信息）"
+
+    async def fake_phase(self, phase):
+        return None
+
+    monkeypatch.setattr("tripmate.session.stream_chatter", fake_stream)
+    monkeypatch.setattr(TeamRunner, "_phase_loop", fake_phase)
+    s = Session.__new__(Session)
+    s.bb = bb
+    s.bus = StatusBus()
+    s.team_events = asyncio.Queue()
+    s.runner = TeamRunner(bb, s.bus)
+    s.chatter = object()  # stub 不使用
+    s.chatter_lock = asyncio.Lock()
+    reply = asyncio.run(s.handle_user_message("帮我规划汉中3天"))
+    assert reply == "已启动旅行规划团队（后台运行，您可继续补充信息）"  # 原样放行，未被改写
+    assert not s.runner.active  # 未被兜底二次启动
+
+
+# ---- 反馈提交兜底（2026-08-31 完整流程实测：宣布已转交但工具未执行 → 修订流程卡死）----
+
+def test_feedback_intent_regex():
+    assert _FEEDBACK_INTENT.search("已记下您的偏好，现在把这条修改意见转给规划团队。")
+    assert _FEEDBACK_INTENT.search("这是对草稿的修改意见，我来提交给规划团队。")  # 第二种实测变体
+    assert _FEEDBACK_INTENT.search("好的，修改意见已提交给规划团队。")
+    assert not _FEEDBACK_INTENT.search("请问第 2 天想怎么调整呢？")  # 追问不误命中
+    assert not _FEEDBACK_INTENT.search("您的预算已更新，规划会自动体现。")  # 一般性确认不误命中
+
+
+def test_feedback_announce_nudges_and_recovers(monkeypatch):
+    """草稿待反馈期宣布已提交修改意见但工具未执行 → nudge 一轮，第二轮真正提交。"""
+    bb = _bb("汉中")
+    _stale_run(bb, "汉中")  # 构造草稿待反馈态（draft 存在、feedback 为空）
+    calls = {"n": 0}
+
+    async def fake_stream(chatter, text, source="user", seen_tools=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "已记下您的偏好，现在把这条修改意见转给规划团队。"  # 宣布但未调工具
+        if seen_tools is not None:
+            seen_tools.add("submit_draft_feedback")
+        return "修改意见已提交给规划团队。"
+
+    async def fake_phase(self, phase):
+        return None
+
+    monkeypatch.setattr("tripmate.session.stream_chatter", fake_stream)
+    monkeypatch.setattr(TeamRunner, "_phase_loop", fake_phase)
+    s = Session.__new__(Session)
+    s.bb = bb
+    s.bus = StatusBus()
+    s.team_events = asyncio.Queue()
+    s.runner = TeamRunner(bb, s.bus)
+    s.runner._awaiting_feedback = True
+    s.chatter = object()  # stub 不使用
+    s.chatter_lock = asyncio.Lock()
+    reply = asyncio.run(s.handle_user_message("第 2 天换成龙泉古镇"))
+    assert reply == "修改意见已提交给规划团队。"  # nudge 后的真实回复
+    assert calls["n"] == 2  # nudge 重试确实发生
 
 
 # ---- start() 黑板清理（问题 1 回归）----

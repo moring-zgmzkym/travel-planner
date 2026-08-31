@@ -216,8 +216,11 @@ def clean_reply(text: str, fallback: str = "") -> str:
     return cleaned or fallback
 
 
-async def stream_chatter(chatter: AssistantAgent, user_text: str, source: str = "user") -> str:
-    """运行 Chatter 并把 Thought/Action/Observation 写入审计日志，返回最终回复文本。"""
+async def stream_chatter(chatter: AssistantAgent, user_text: str, source: str = "user",
+                         seen_tools: set[str] | None = None) -> str:
+    """运行 Chatter 并把 Thought/Action/Observation 写入审计日志，返回最终回复文本。
+
+    seen_tools：可选集合，收集本轮真正执行过的工具名（供"宣布启动但工具未执行"兜底判定）。"""
     from autogen_agentchat.messages import TextMessage, ThoughtEvent
     last = ""
     stream = chatter.run_stream(task=TextMessage(content=user_text, source=source))
@@ -233,6 +236,10 @@ async def stream_chatter(chatter: AssistantAgent, user_text: str, source: str = 
                 if getattr(call, "name", None):
                     AUDIT.action("Chatter", call.name, str(getattr(call, "arguments", "")))
         elif isinstance(msg, ToolCallExecutionEvent):
+            if seen_tools is not None:
+                for c in msg.content:
+                    if getattr(c, "name", None):
+                        seen_tools.add(c.name)
             obs = "; ".join(getattr(c, "content", "") or "" for c in msg.content)[:400]
             AUDIT.observation("Chatter", obs)
         elif isinstance(msg, BaseChatMessage) and not isinstance(msg, BaseAgentEvent):

@@ -66,7 +66,8 @@ def test_finish_guide_search_writes_and_advances(monkeypatch):
         result = json.loads(await tools["finish_guide_search"](""))
         assert result["status"] == "written"
         assert len(bb.profile.guide_digest) >= 1
-        assert ctx.state.step == "PROC_SUMMARIZE"
+        # 攻略收割完成 → 交棒 MCP 收割（交错协议）；直跳 PROC_SUMMARIZE 会让 BookingButler 永远轮不到收割
+        assert ctx.state.step == "MCP_COLLECT"
         assert all(g.reference_only for g in bb.profile.guide_digest)  # 降级数据必标注
 
         # 复用场景：变更影响分析判定攻略未受影响（reuse 开关开启）→ 走缓存不重搜

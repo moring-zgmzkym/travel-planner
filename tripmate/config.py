@@ -30,9 +30,14 @@ class LLMConfig:
     MAX_TOKENS: int = int(_env("LLM_MAX_TOKENS", "8192"))
     TEMPERATURE: float = float(_env("LLM_TEMPERATURE", "0.3"))
     # 单次调用超时与重试（秒/次）。预算过宽会让限流通道把一次调用拖到 20 分钟，
-    # 表现为"Agent 不及时返回 / Chatter 不回复"——失败应尽快暴露给护栏与用户。
+    # 表现为"Agent 不及时返回 / Chatter 不回复"——失败应尽快暴露给护栏与降级链路。
+    # 主备差异化（2026-08-31 实测）：主 150s（健康重调用需 1-4 分钟，不能再小）；
+    # 备 300s——切到备即说明主通道已挂，拥堵窗口 150s 常砍死本可完成的备通道调用
+    # （12:02/13:55 两次双通道超时致死）。SDK 同通道重试关闭：拥堵下重试同一堵死的
+    # 通道只是再等 150s，跨通道切换才是有效重试；最坏 150+300=450s/轮（原 ~600s）。
     TIMEOUT_S: float = float(_env("LLM_TIMEOUT_S", "150"))
-    MAX_RETRIES: int = int(_env("LLM_MAX_RETRIES", "1"))
+    FALLBACK_TIMEOUT_S: float = float(_env("LLM_FALLBACK_TIMEOUT_S", "300"))
+    MAX_RETRIES: int = int(_env("LLM_MAX_RETRIES", "0"))
     # 次级模型：主模型调用失败（网络/限流/超时）时自动切换，恢复后自动切回。
     # 三变量齐备才启用；未配置时行为与单模型完全一致。
     FALLBACK_API_KEY: str = _env("LLM_FALLBACK_API_KEY")
@@ -85,7 +90,7 @@ class BudgetConfig:
 class ServerConfig:
     HOST: str = _env("HOST", "127.0.0.1")
     PORT: int = int(_env("PORT", "8000"))
-    HEARTBEAT_S: float = 30.0          # WebSocket 心跳（§2.3）
+    HEARTBEAT_S: float = 30.0          # 团队运行心跳间隔（§6 状态推送）：长任务静默期维持徽章/时间线可视状态（前端 WS ping 见 app.js 的 25s 定时）
     STATUS_REPLAY: int = 80            # 断线重连补发的最近状态条数（风险 #7）
 
 

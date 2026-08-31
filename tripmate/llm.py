@@ -48,17 +48,17 @@ _MODEL_INFO = ModelInfo(
 _PRIMARY_COOLDOWN_S = 120.0
 
 
-def _build_client(base_url: str, api_key: str, model: str) -> OpenAIChatCompletionClient:
+def _build_client(base_url: str, api_key: str, model: str, timeout: float) -> OpenAIChatCompletionClient:
     return OpenAIChatCompletionClient(
         model=model,
         api_key=api_key,
         base_url=base_url,
         temperature=LLMConfig.TEMPERATURE,
         max_tokens=LLMConfig.MAX_TOKENS,
-        # 预算从 .env 读取（默认 150s×2 次尝试，最坏 ~5 分钟/调用而非 20 分钟），
-        # 失败尽快暴露给 Agent 自愈/护栏/降级链路
+        # 主 150s / 备 300s（LLMConfig 注释：主备差异化实测依据）；失败尽快暴露给
+        # Agent 自愈/护栏/降级链路，跨通道切换即有效重试（SDK 同通道重试已关闭）
         max_retries=LLMConfig.MAX_RETRIES,
-        timeout=LLMConfig.TIMEOUT_S,
+        timeout=timeout,
         model_info=_MODEL_INFO,
     )
 
@@ -237,11 +237,12 @@ def get_model_client() -> ChatCompletionClient:
     if _client is None:
         if not LLMConfig.API_KEY:
             raise RuntimeError("未配置 LLM_API_KEY（.env），无法调用模型。")
-        primary = _build_client(LLMConfig.BASE_URL, LLMConfig.API_KEY, LLMConfig.MODEL)
+        primary = _build_client(LLMConfig.BASE_URL, LLMConfig.API_KEY, LLMConfig.MODEL,
+                                timeout=LLMConfig.TIMEOUT_S)
         if LLMConfig.FALLBACK_API_KEY and LLMConfig.FALLBACK_BASE_URL and LLMConfig.FALLBACK_MODEL:
             secondary = _build_client(
-                LLMConfig.FALLBACK_BASE_URL, LLMConfig.FALLBACK_API_KEY, LLMConfig.FALLBACK_MODEL
-            )
+                LLMConfig.FALLBACK_BASE_URL, LLMConfig.FALLBACK_API_KEY, LLMConfig.FALLBACK_MODEL,
+                timeout=LLMConfig.FALLBACK_TIMEOUT_S)
             logger.info("模型客户端就绪：主 %s，次级 %s（自动故障切换已启用）",
                         LLMConfig.MODEL, LLMConfig.FALLBACK_MODEL)
             _client = _FallbackClient(primary, secondary)
