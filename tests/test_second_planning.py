@@ -78,10 +78,14 @@ def test_start_intent_regex_variants():
     # 2026-08-31 实测漏接变体：称呼语插在"开始"与"规划"之间，团队从未启动、面板全程无事件
     assert _START_INTENT.search("已记下您的需求，现在开始为您规划。")
     assert _START_INTENT.search("需求已记好，现在开始为您规划。")
+    # 2026-09-01 实测漏接变体："开工"措辞（"马上让规划团队开工"）宣布启动但工具未执行
+    assert _START_INTENT.search("马上让规划团队开工！")
     # 延迟/拒绝语义不得误命中（否则用户明确说"先别开始"也会被兜底启动）
     assert not _START_INTENT.search("等您确认后再开始规划。")
     assert not _START_INTENT.search("先别开始规划，我还没想好。")
     assert not _START_INTENT.search("规划团队还没启动，请稍候。")
+    assert not _START_INTENT.search("先别开工，我还没想好。")
+    assert not _START_INTENT.search("规划团队还没开工。")
 
 
 # ---- 缺字段闸门（问题 2 回归）----
