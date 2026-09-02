@@ -57,10 +57,11 @@ python run.py          # 或 Windows 双击 run.bat
 | `tripmate/llm.py` | 模型客户端工厂：主备自动故障切换（主模型失败切次级、冷却后自动切回）+ token 成本控制 |
 | `tripmate/tools/` | 搜索、图片、MCP 客户端基座、车票/酒店/天气适配层 |
 | `tripmate/planning.py` | 变更影响分析（§5.3）、预算核算（§4.5）、草稿校验（可单测纯逻辑） |
-| `tripmate/pdf_gen.py` | reportlab PDF（weasyprint 在 Windows 缺 GTK，按企划书备选方案切换） |
+| `tripmate/pdf_gen.py` | PDF 生成入口：按模板名从注册表分发（weasyprint 在 Windows 缺 GTK，按企划书备选方案采用 reportlab） |
+| `tripmate/pdf_templates/` | 固定模板库：公共积木基类 + 多风格版式（经典旅行手册/慢游图文路书/极简黑白/卡片式/暖色休闲/手账风），前端可选路书样式 |
 | `tripmate/gateway/app.py` | FastAPI + WebSocket 网关 |
 | `static/` | 前端三件套（原生 JS） |
-| `tests/` | 53 项单测（黑板/影响分析/打分/校验/selector/路书PDF/主备切换/二次规划/会话） |
+| `tests/` | 64 项单测（黑板/影响分析/打分/校验/selector/路书PDF/多模板PDF冒烟与边界/主备切换/二次规划/会话） |
 | `scripts/` | 端到端冒烟脚本（e2e_step1/2/3） |
 | `outputs/` | PDF 与配图产物 |
 | `logs/tripmate.log` | ReAct 审计日志（Thought→Action→Observation→产出，验收 #16 证据） |
@@ -97,7 +98,7 @@ python run.py          # 或 Windows 双击 run.bat
 ## 测试
 
 ```bash
-python -m pytest tests/ -q          # 53 项单测
+python -m pytest tests/ -q          # 64 项单测
 python scripts/e2e_step1_chatter.py # 冒烟① Chatter 抽取与启动判定（需 LLM）
 python scripts/e2e_step2_collect.py # 冒烟② 四 Agent 协同出草稿（需 LLM）
 python scripts/e2e_step3_full.py    # 冒烟③ 中途改预算→反馈修订→确认→PDF 全流程（需 LLM）
