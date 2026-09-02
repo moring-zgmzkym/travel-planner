@@ -146,6 +146,7 @@ class FinalDelivery(BaseModel):
     order_summary: list[dict[str, Any]] = Field(default_factory=list)
     total_price: float = 0.0
     finished_at: str = ""
+    render_source: str = "template"  # "designer" 或 "template:<模板名>"（A/B 溯源标注）
 
 
 class ChangelogEntry(BaseModel):
@@ -179,4 +180,4 @@ class TravelProfile(BaseModel):
     changelog: list[ChangelogEntry] = Field(default_factory=list)
 
 
-WriterName = Literal["chatter", "processor", "researcher", "booking", "planner", "system"]
+WriterName = Literal["chatter", "processor", "researcher", "booking", "planner", "designer", "system"]

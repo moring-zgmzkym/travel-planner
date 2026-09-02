@@ -2,6 +2,8 @@
 
 > 实训课程大作业：基于 **AutoGen 0.7.5 AgentChat（SelectorGroupChat）** 的对等多 Agent 协同旅游规划系统。
 > 一次对话式交互 → 产出 **可执行行程 PDF + 推荐订单清单**（车票/酒店已按用户要求筛选勾选）。
+> 双路书通道：**固定模板 ×6**（确定性，低成本）与 **✨ AI 设计师排版**（第 6 Agent 现场创作 HTML →
+> 无头浏览器渲染 PDF，失败自动回退模板），同一份数据可 A/B 对比。
 
 对应企划书《旅游规划多Agent协同系统企划书.md》，文中 §x 引用均指向该文档章节。
 
@@ -59,6 +61,9 @@ python run.py          # 或 Windows 双击 run.bat
 | `tripmate/planning.py` | 变更影响分析（§5.3）、预算核算（§4.5）、草稿校验（可单测纯逻辑） |
 | `tripmate/pdf_gen.py` | PDF 生成入口：按模板名从注册表分发（weasyprint 在 Windows 缺 GTK，按企划书备选方案采用 reportlab） |
 | `tripmate/pdf_templates/` | 固定模板库：公共积木基类 + 多风格版式（经典旅行手册/慢游图文路书/极简黑白/卡片式/暖色休闲/手账风），前端可选路书样式 |
+| `tripmate/designer.py` | ✨ AI 设计师（第 6 Agent）：确定性外循环（生成→消毒→渲染→诊断→≤2 轮修正，600s 熔断）+ 内容寻址缓存；不进群聊、由定稿分流调用（见 `docs/html-designer-plan.md`） |
+| `tripmate/design/` | 印刷级设计系统：print.css + 9 类组件片段库 + 金样（注入 Designer 提示词） |
+| `tripmate/tools/htmlpdf.py` | HTML 允许列表消毒器 + file:// 白名单 + Playwright/Edge 双通道渲染 + fitz 渲染诊断 |
 | `tripmate/gateway/app.py` | FastAPI + WebSocket 网关 |
 | `static/` | 前端三件套（原生 JS） |
 | `tests/` | 64 项单测（黑板/影响分析/打分/校验/selector/路书PDF/多模板PDF冒烟与边界/主备切换/二次规划/会话） |
@@ -98,12 +103,25 @@ python run.py          # 或 Windows 双击 run.bat
 ## 测试
 
 ```bash
-python -m pytest tests/ -q          # 64 项单测
+python -m pytest tests/ -q          # 全量单测
 python scripts/e2e_step1_chatter.py # 冒烟① Chatter 抽取与启动判定（需 LLM）
 python scripts/e2e_step2_collect.py # 冒烟② 四 Agent 协同出草稿（需 LLM）
 python scripts/e2e_step3_full.py    # 冒烟③ 中途改预算→反馈修订→确认→PDF 全流程（需 LLM）
 python scripts/e2e_step4_finalize.py# 冒烟④ 定稿→PDF/订单清单（无需 LLM，可随时验证）
+python scripts/designer_poc.py      # 冒烟⑤ 渲染器 Spike：Playwright/Edge 双通道（无需 LLM）
+python scripts/designer_sample.py   # 冒烟⑥ Designer 全链路样张（金样直出，无需 LLM）
 ```
+
+## AI 设计师排版（方向二，docs/html-designer-plan.md）
+
+- **选择方式**：前端「路书样式」下拉选「✨ AI 设计师排版」（`basic_info.template=designer`），定稿时自动分流。
+- **流程**：定稿时由第 6 个 Agent（Designer）读取黑板快照 → 组合设计系统写出 body 片段 →
+  确定性代码消毒（允许列表：剥脚本/事件属性/外链资源，本地图片白名单限 outputs/images）→
+  套壳注入 print.css → Playwright Chromium 渲染 A4 PDF（Edge CLI 兜底）→ fitz 确定性诊断
+  （页数/必备章节关键词）→ 不达标自动反馈修正（≤2 轮，整链 600s 熔断）→ 仍失败**自动回退模板链**，
+  用户永远能拿到 PDF；产物页脚标注「AI 版面设计师生成」，前端卡片显示来源。
+- **首次使用**：`pip install -r requirements.txt && playwright install chromium`（约 150MB 一次性下载）；
+  未装 Chromium 时自动降级 Edge 渲染；同数据重复定稿走内容寻址缓存只重渲染不重新生成。
 
 ## 已知边界（如实声明）
 
@@ -113,3 +131,6 @@ python scripts/e2e_step4_finalize.py# 冒烟④ 定稿→PDF/订单清单（无�
 - 支付不接触（需商户资质，§4.4/§7），只做订单参数汇总 + 直达链接。
 - weasyprint 在 Windows 需 GTK 运行库，本项目按企划书备选方案采用 reportlab（HTML 模板仍用于网页端草稿预览）。
 - 12306-MCP 为社区实现，可能随 12306 接口变动失效；失效自动降级并提示。
+- AI 设计师模式：每次运行版式独一无二（定位为 feature，需要稳定版式选固定模板）；LLM 输出的
+  HTML 经确定性消毒后才渲染，本地图片引用白名单限 `outputs/images/`，禁止外链资源；`outputs/`
+  目录经 HTTP 静态可达（本机单用户设计）。

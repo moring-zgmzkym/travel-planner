@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from ..config import BASE_DIR, OUTPUT_DIR, ServerConfig
+from ..designer import DESIGNER_TEMPLATE_META
 from ..llm import usage_summary
 from ..pdf_templates import get_template, list_templates
 from ..planning import compute_budget
@@ -91,8 +92,9 @@ async def usage() -> JSONResponse:
 
 @app.get("/api/templates")
 async def templates() -> JSONResponse:
-    """PDF 模板列表（前端下拉选择；定稿时按黑板 basic_info.template 渲染）。"""
-    return JSONResponse({"templates": list_templates()})
+    """PDF 模板列表（前端下拉选择；定稿时按黑板 basic_info.template 渲染）。
+    designer 是伪模板条目（不走模板注册表，定稿分流到 Designer 链）。"""
+    return JSONResponse({"templates": [*list_templates(), DESIGNER_TEMPLATE_META]})
 
 
 def _render_draft_html(sess: Session) -> str:
@@ -158,7 +160,8 @@ async def _handle_team_event(ws: WebSocket, sess: Session, item) -> None:
     elif kind == "completed":
         await _send(ws, {"type": "final", "pdf_url": data.pdf_url,
                          "orders": data.order_summary,
-                         "total_price": data.total_price}, sess)
+                         "total_price": data.total_price,
+                         "render_source": data.render_source}, sess)
         await _send(ws, {"type": "usage", "usage": usage_summary()})  # 定稿即刷新消耗条（不等下次聊天）
         reply = await sess.relay_team_event(
             "规划团队已完成定稿（黑板 final 分区：PDF + 推荐订单清单）。请读取后向用户转述成果要点，"
@@ -221,7 +224,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     if sess.bb.profile.final:
         f = sess.bb.profile.final
         await _send(ws, {"type": "final", "pdf_url": f.pdf_url, "orders": f.order_summary,
-                         "total_price": f.total_price})
+                         "total_price": f.total_price, "render_source": f.render_source})
 
     sender = asyncio.create_task(_sender(ws, sess))
     try:
@@ -242,6 +245,16 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 await _send(ws, {"type": "chat", "role": "system", "text": text}, sess)
             elif kind == "template":
                 name = (msg.get("name") or "").strip()
+                if name == DESIGNER_TEMPLATE_META["name"]:
+                    # designer 非注册表模板，特判放行（分流在 _deliver_final，D5）
+                    await sess.bb.apply_basic_info(
+                        {"template": name}, "chatter", "用户选择 AI 设计师排版")
+                    await _send(ws, {"type": "chat", "role": "system",
+                                     "text": "已切换路书样式为「✨ AI 设计师排版」，"
+                                             "定稿时将由版面设计师现场创作（约需额外几分钟，"
+                                             "未达标会自动回退经典模板）。"}, sess)
+                    await _send(ws, {"type": "profile", "profile": sess.profile_snapshot()}, sess)
+                    continue
                 try:
                     tpl = get_template(name or None)
                 except ValueError:

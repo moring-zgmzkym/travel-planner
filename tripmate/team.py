@@ -29,6 +29,7 @@ from .mocks.data import kb_for_city
 from .models import (Draft, DraftDay, DraftFeedback, FinalDelivery, GuideDigestItem,
                      HotelCandidate, ImageItem, PlanInput, TicketCandidate, TravelProfile)
 from .pdf_gen import build_pdf
+from .pdf_templates import REGISTRY
 from .planning import PACE_SPOTS, analyze_impact, compute_budget, validate_draft
 from .status import AUDIT, StatusBus
 from .tools.hotels import query_hotels, score_and_select as score_hotels
@@ -40,6 +41,7 @@ AGENT_PROC = "InformationProcessor"
 AGENT_RES = "Researcher"
 AGENT_MCP = "BookingButler"
 AGENT_PLANNER = "Planner"
+AGENT_DESIGNER = "Designer"   # 不进群聊：由 _deliver_final 分流后确定性编排（方向二 v2）
 
 # 状态机步骤 → 发言人（对等协议，§6.2 消息类型表）
 SPEAKER: dict[str, str] = {
@@ -453,13 +455,31 @@ def make_planner_tools(ctx: TeamContext):
     return [submit_draft, request_images, deliver_final]
 
 
-async def _deliver_final(ctx: TeamContext) -> str:
-    """定稿：渲染 PDF + 组装订单清单 + 写 final 分区 + 完成事件（Agent 工具与护栏共用）。"""
+async def _deliver_final(ctx: TeamContext, force_template: bool = False) -> str:
+    """定稿：渲染 PDF + 组装订单清单 + 写 final 分区 + 完成事件（Agent 工具与护栏共用）。
+
+    v2 分流：basic_info.template == "designer" 走 Designer 链（确定性外循环，见 designer.py），
+    失败/超时**在分支内部**回退模板链（外层崩溃抢救救不了 final 缺失，审核 #3）；
+    CancelledError 原样放行（用户停止语义，不得转成回退继续跑）。
+    force_template=True（护栏 finalize 分支）：跳过 Designer 链直接走模板通道——
+    确定性兜底不得再进 LLM 循环（D5 条文）。
+    """
     prof: TravelProfile = ctx.bb.profile
     if not prof.draft:
         return _ok(status="error", error="黑板无草稿")
-    path = await asyncio.to_thread(
-        build_pdf, prof.model_copy(deep=True), ctx.run_id, prof.basic_info.template)
+    template = prof.basic_info.template
+    pdf_path = ""
+    render_source = ""
+    if template == "designer" and not force_template:
+        pdf_path, render_source = await _deliver_designer(ctx, prof)
+    if not pdf_path:
+        # 回退入口过滤非法模板名（"designer" 或损坏值传给注册表会 ValueError，审核 #3）
+        tpl = template if template in REGISTRY else None
+        if template == "designer":
+            render_source = ""  # 回退不冒充 designer，来源标注走模板通道
+        pdf_path = await asyncio.to_thread(
+            build_pdf, prof.model_copy(deep=True), ctx.run_id, tpl)
+        render_source = render_source or f"template:{tpl or 'classic'}"
     # to_thread：reportlab 渲染是同步重活，内联执行会冻结整个事件循环（所有会话的推送全停摆）；
     # 深拷贝快照隔离渲染期间的用户并发写黑板（阻塞版的隐含串行安全性随线程化消失）
     orders = []
@@ -479,17 +499,51 @@ async def _deliver_final(ctx: TeamContext) -> str:
                            "link": h.link, "reason": h.reason, "reference_only": h.reference_only})
             total += amt
     final = FinalDelivery(
-        pdf_path=path,
-        pdf_url="/outputs/" + path.replace("\\", "/").split("/")[-1],
+        pdf_path=str(pdf_path),
+        pdf_url="/outputs/" + str(pdf_path).replace("\\", "/").split("/")[-1],
         order_summary=orders, total_price=round(total, 1),
-        finished_at=prof.updated_at,
+        finished_at=prof.updated_at, render_source=render_source,
     )
     await ctx.bb.write("final", final, "planner", "最终交付（PDF + 订单清单）")
     ctx.state.step = "DONE"
-    await ctx.bus.emit(AGENT_PLANNER, "规划完成：PDF 已生成，订单清单已就绪", "STATUS_COMPLETED",
-                       pdf_url=final.pdf_url)
-    return _ok(status="ok", pdf_path=path, pdf_url=final.pdf_url,
-               orders=orders, total_price=final.total_price)
+    source_note = ("AI 设计师排版" if final.render_source == "designer"
+                   else "模板排版" + (f"（designer 失败自动回退）" if template == "designer" else ""))
+    await ctx.bus.emit(AGENT_PLANNER, f"规划完成：PDF 已生成（{source_note}），订单清单已就绪",
+                       "STATUS_COMPLETED", pdf_url=final.pdf_url, render_source=final.render_source)
+    return _ok(status="ok", pdf_path=final.pdf_path, pdf_url=final.pdf_url,
+               orders=orders, total_price=final.total_price, render_source=final.render_source)
+
+
+async def _deliver_designer(ctx: TeamContext, prof: TravelProfile) -> tuple[str, str]:
+    """Designer 链交付（D5：回退做在分支内部；CancelledError 放行）。返回 (pdf_path, render_source)，
+    失败返回 ("", "") 由调用方走模板回退。"""
+    from . import designer as designer_mod
+    from .llm import check_budget, usage_snapshot
+
+    await ctx.bus.emit(AGENT_DESIGNER, "✨ 版面设计师开始排版…", "STATUS_PROGRESS")
+    usage_before = usage_snapshot()
+    try:
+        result = await asyncio.wait_for(
+            designer_mod.designer_chain(
+                prof=prof.model_copy(deep=True), run_id=ctx.run_id,
+                agent_factory=designer_mod.make_autogen_factory(),
+                system_prompt=prompts.DESIGNER_PROMPT,
+                budget_check=check_budget, bus=ctx.bus),
+            timeout=designer_mod.DESIGNER_TIMEOUT_S)
+    except asyncio.CancelledError:
+        raise  # 用户停止：立即终止，不回退不吞异常
+    except Exception as exc:  # noqa: BLE001 — 任何失败（含 600s 熔断）都回退模板链
+        AUDIT.output(AGENT_DESIGNER, f"designer 链失败，回退模板链：{type(exc).__name__}: {exc}")
+        await ctx.bus.emit(AGENT_DESIGNER,
+                           "AI 排版未达标，已自动回退经典模板通道（不影响交付）", "STATUS_PROGRESS")
+        return "", ""
+    u = usage_snapshot()
+    used = (u.prompt_tokens - usage_before.prompt_tokens) + (u.completion_tokens - usage_before.completion_tokens)
+    AUDIT.output(AGENT_DESIGNER,
+                 f"designer 完成：attempts={result.attempts} engine={result.engine} "
+                 f"cache={result.from_cache} designer_token≈{used} pdf={result.pdf_path}")
+    await ctx.bus.emit(AGENT_DESIGNER, "✨ AI 版面设计完成，PDF 已渲染", "STATUS_PROGRESS")
+    return result.pdf_path, "designer"
 
 
 # ---------------------------------------------------------------------------
@@ -724,13 +778,17 @@ class TeamRunner:
         task_text = self._phase_task(phase, changed_fields)
         # 阶段锚点：每次 _run_phase 重置（检查点重跑也重新起算），心跳 elapsed 与前端 ETA 对比才不失真
         self._phase_started = asyncio.get_running_loop().time()
-        # ETA（2026-08-31 实测分布）：collect 首轮 5-10 分、增量重跑 5-15 分、revise 1-3 分、finalize 1-2 分
+        # ETA（2026-08-31 实测分布）：collect 首轮 5-10 分、增量重跑 5-15 分、revise 1-3 分、
+        # finalize 1-2 分；designer 模式含 LLM 排版与渲染，4-8 分（超 600s 自动回退模板）
+        is_designer = self.bb.profile.basic_info.template == "designer"
         eta = {"collect": (5, 15) if changed_fields else (5, 10),
-               "revise": (1, 3), "finalize": (1, 2)}[phase]
+               "revise": (1, 3),
+               "finalize": (4, 8) if is_designer else (1, 2)}[phase]
         await self.bus.emit("TeamRunner",
                             {"collect": "规划团队启动（信息处理/信息收集/MCP 专项/计划规划 四 Agent 对等协同）",
                              "revise": f"草稿修订（第 {self._draft_rounds} 轮）",
-                             "finalize": "草稿已确认，进入定稿流程（配图 + PDF）"}[phase],
+                             "finalize": "草稿已确认，进入定稿流程（AI 设计师排版 + PDF）" if is_designer
+                             else "草稿已确认，进入定稿流程（配图 + PDF）"}[phase],
                             "STATUS_PHASE", phase=phase, eta_min=list(eta))
         result_text, all_texts = await self._stream_team(team, task_text)
         # 确定性护栏：阶段结束以黑板为准，缺失分区直接补齐（LLM 协议执行不完美时的可靠性兜底）
@@ -823,7 +881,8 @@ class TeamRunner:
                 if not self.bb.profile.draft:
                     draft = _fallback_draft(self.bb.profile)
                     await self.bb.write("draft", draft, "planner", "护栏补齐：草稿缺失")
-                await _deliver_final(ctx)
+                # force_template：确定性兜底不再进 Designer LLM 链（D5 条文）
+                await _deliver_final(ctx, force_template=True)
                 AUDIT.observation("TeamRunner", "guardrail 补齐 final")
 
     def _build_team(self, ctx: TeamContext, phase: str) -> SelectorGroupChat:

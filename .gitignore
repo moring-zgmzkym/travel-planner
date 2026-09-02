@@ -6,3 +6,8 @@ outputs/images/
 outputs/*.pdf
 .pytest_cache/
 learning/
+
+# 方向二 Designer 运行时产物（含本机绝对路径，勿入库；样张可由 scripts/designer_sample.py 重新生成）
+outputs/html/
+outputs/htmlcache/
+outputs/designer_poc/

@@ -1,0 +1,159 @@
+/* TripMate 印刷级设计系统（方向二 Designer 链路，docs/html-designer-plan.md D1）。
+   由确定性套壳代码全文内联注入 <style>，不经 LLM。
+   约定：@page 为版式唯一边距来源（Spike 0.3 实测 @page 优先于 page.pdf margin 参数）；
+   主题经 body class 切换（theme-azure / theme-warm / theme-fresh / theme-mono）。 */
+
+/* ---------- 基础与 @page ---------- */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+@page { size: A4; margin: 16mm 14mm 18mm; }
+
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+body {
+  font-family: "Microsoft YaHei", "PingFang SC", "DengXian", "SimSun", sans-serif;
+  font-size: 10.5pt;
+  line-height: 1.65;
+  color: var(--ink);
+  background: #fff;
+}
+
+/* 主题变量：新主题 = 复制一组变量即可 */
+body { --ink: #23232a; --sub: #6b7080; --line: #e3e6ee; --bg-soft: #f5f7fb; --card: #ffffff; }
+body.theme-azure { --primary: #2f6fed; --accent: #6c4de0; --primary-soft: #eaf0fe;
+  --hero: linear-gradient(135deg, #2f6fed 0%, #6c4de0 100%); }
+body.theme-warm  { --primary: #e0662f; --accent: #d9a13c; --primary-soft: #fdf0e8;
+  --hero: linear-gradient(135deg, #e0662f 0%, #d9a13c 100%); }
+body.theme-fresh { --primary: #1f9d6b; --accent: #2f9ded; --primary-soft: #e8f7f0;
+  --hero: linear-gradient(135deg, #1f9d6b 0%, #2f9ded 100%); }
+body.theme-mono  { --primary: #2b2b31; --accent: #6b7080; --primary-soft: #f0f0f2;
+  --hero: linear-gradient(135deg, #3a3a42 0%, #6b7080 100%); }
+
+/* ---------- 封面 ---------- */
+.cover { background: var(--hero); color: #fff; border-radius: 16px;
+  padding: 30px 28px 26px; break-inside: avoid; }
+.cover-kicker { font-size: 9.5pt; letter-spacing: 2px; opacity: .85; }
+.cover-title { font-size: 26pt; font-weight: 700; line-height: 1.25; margin: 6px 0 8px; }
+.cover-sub { font-size: 11pt; opacity: .92; }
+.cover-img { width: 100%; height: 62mm; object-fit: cover; border-radius: 12px;
+  margin-top: 14px; display: block; }
+.cover-img-missing { width: 100%; height: 40mm; border-radius: 12px; margin-top: 14px;
+  background: rgba(255, 255, 255, .18); display: flex; align-items: center;
+  justify-content: center; font-size: 10pt; opacity: .9; }
+.cover-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.cover-meta .tag { background: rgba(255, 255, 255, .2); border-radius: 999px;
+  padding: 2px 12px; font-size: 9pt; }
+
+/* ---------- 章节标题 ---------- */
+.sec { margin-top: 18px; }
+.sec > h2 { font-size: 14.5pt; color: var(--ink); padding-left: 10px;
+  border-left: 4px solid var(--primary); line-height: 1.35; break-after: avoid; }
+.sec > .sec-note { font-size: 9pt; color: var(--sub); margin: 2px 0 8px 14px; }
+
+/* ---------- 通用卡片 / 网格 ---------- */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px; break-inside: avoid; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mt8 { margin-top: 8px; } .mt12 { margin-top: 12px; }
+
+/* ---------- 行程总览表 ---------- */
+.ov-table { width: 100%; border-collapse: collapse; font-size: 9.5pt; break-inside: avoid; }
+.ov-table th { background: var(--primary-soft); color: var(--ink); text-align: left;
+  padding: 6px 10px; border: 1px solid var(--line); font-weight: 600; }
+.ov-table td { padding: 6px 10px; border: 1px solid var(--line); vertical-align: top; }
+.ov-table tr:nth-child(even) td { background: #fafbfe; }
+
+/* ---------- 逐日行程卡 ---------- */
+.day-card { border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  margin-top: 12px; break-inside: avoid; }
+.day-head { background: var(--primary-soft); padding: 8px 14px; display: flex;
+  align-items: baseline; gap: 10px; }
+.day-badge { background: var(--primary); color: #fff; border-radius: 8px;
+  padding: 1px 10px; font-size: 10pt; font-weight: 700; }
+.day-date { font-size: 9.5pt; color: var(--sub); }
+.day-body { padding: 10px 14px 12px; }
+.time-row { display: flex; gap: 10px; padding: 4px 0; font-size: 10pt; }
+.time-label { flex: 0 0 52px; color: var(--primary); font-weight: 600; }
+.time-text { flex: 1; }
+.spots { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+.spot-chip { background: var(--bg-soft); border: 1px solid var(--line);
+  border-radius: 999px; padding: 1px 10px; font-size: 9pt; color: var(--ink); }
+
+/* ---------- 垂直时间线（景点/美食推荐等） ---------- */
+.tl { margin-top: 10px; }
+.tl-item { position: relative; padding: 0 0 10px 20px; border-left: 2px solid var(--line);
+  margin-left: 6px; break-inside: avoid; }
+.tl-item:last-child { border-left-color: transparent; }
+.tl-dot { position: absolute; left: -6px; top: 3px; width: 10px; height: 10px;
+  border-radius: 50%; background: var(--primary); border: 2px solid #fff;
+  box-shadow: 0 0 0 1px var(--primary); }
+.tl-title { font-weight: 600; font-size: 10.5pt; }
+.tl-text { font-size: 9.5pt; color: var(--sub); }
+
+/* ---------- 订单卡 ---------- */
+.ord-card { border: 1px solid var(--line); border-left: 4px solid var(--primary);
+  border-radius: 10px; padding: 10px 14px; margin-top: 10px; break-inside: avoid; }
+.ord-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ord-type { font-size: 8.5pt; color: var(--primary); border: 1px solid var(--primary);
+  border-radius: 4px; padding: 0 6px; }
+.ord-name { font-weight: 600; font-size: 11pt; }
+.ord-price { font-size: 12pt; font-weight: 700; color: var(--primary); white-space: nowrap; }
+.ord-reason { font-size: 9pt; color: var(--sub); margin-top: 3px; }
+.ord-meta { font-size: 9pt; color: var(--sub); margin-top: 2px; }
+.ord-total { display: flex; justify-content: flex-end; gap: 10px; align-items: baseline;
+  margin-top: 12px; font-size: 12pt; font-weight: 700; color: var(--primary); }
+
+/* ---------- 预算 ---------- */
+.budget-wrap { background: var(--bg-soft); border-radius: 12px; padding: 14px;
+  break-inside: avoid; }
+.budget-note { font-size: 8.5pt; color: var(--sub); margin-top: 6px; }
+.budget-table { width: 100%; border-collapse: collapse; font-size: 9.5pt; margin-top: 8px; }
+.budget-table td, .budget-table th { padding: 5px 8px; border-bottom: 1px solid var(--line); }
+.budget-table td:last-child, .budget-table th:last-child { text-align: right; white-space: nowrap; }
+
+/* ---------- 图墙 ---------- */
+.wall { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.wall figure { break-inside: avoid; }
+.wall img { width: 100%; height: 42mm; object-fit: cover; border-radius: 8px; display: block; }
+.wall figcaption { font-size: 8.5pt; color: var(--sub); padding-top: 3px; }
+.wall-2 { grid-template-columns: repeat(2, 1fr); }
+.wall-2 img { height: 52mm; }
+
+/* ---------- 酒店卡（左图右文） ---------- */
+.hotel-card { display: flex; gap: 12px; border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px; margin-top: 10px; break-inside: avoid; }
+.hotel-card img, .hotel-img-missing { flex: 0 0 46mm; width: 46mm; height: 34mm;
+  object-fit: cover; border-radius: 8px; }
+.hotel-img-missing { background: var(--bg-soft); display: flex; align-items: center;
+  justify-content: center; color: var(--sub); font-size: 9pt; }
+.hotel-info { flex: 1; min-width: 0; }
+.hotel-name { font-weight: 700; font-size: 11.5pt; }
+.hotel-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 9.5pt;
+  color: var(--sub); margin-top: 4px; }
+.hotel-review { font-size: 9pt; color: var(--ink); background: var(--bg-soft);
+  border-radius: 8px; padding: 6px 10px; margin-top: 6px; }
+
+/* ---------- 美食卡（左图右文） ---------- */
+.food-card { display: flex; gap: 12px; border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px; margin-top: 10px; break-inside: avoid; }
+.food-card img, .food-img-missing { flex: 0 0 40mm; width: 40mm; height: 40mm;
+  object-fit: cover; border-radius: 8px; }
+.food-img-missing { background: var(--primary-soft); display: flex; align-items: center;
+  justify-content: center; color: var(--primary); font-size: 9pt; }
+.food-info { flex: 1; min-width: 0; }
+.food-name { font-weight: 700; font-size: 11pt; }
+.food-text { font-size: 9.5pt; color: var(--sub); margin-top: 3px; }
+
+/* ---------- 标注体系（数据诚实） ---------- */
+.ref-tag { display: inline-block; font-size: 8pt; color: #a15c00; background: #fff4e0;
+  border-radius: 4px; padding: 0 6px; margin-left: 6px; }
+.mock-tag { display: inline-block; font-size: 8pt; color: var(--sub); background: var(--bg-soft);
+  border-radius: 4px; padding: 0 6px; margin-left: 6px; }
+
+/* ---------- 结尾页 / 页脚 ---------- */
+.ending { text-align: center; padding: 26px 20px; border-top: 2px solid var(--primary-soft);
+  margin-top: 22px; break-inside: avoid; }
+.ending .big { font-size: 14pt; font-weight: 700; color: var(--primary); }
+.ending .small { font-size: 9.5pt; color: var(--sub); margin-top: 6px; }
+.doc-footer { margin-top: 16px; padding-top: 8px; border-top: 1px solid var(--line);
+  font-size: 8pt; color: var(--sub); display: flex; justify-content: space-between; }

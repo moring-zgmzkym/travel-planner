@@ -14,7 +14,7 @@ let etaRange = null; // 当前阶段预计耗时 [下限, 上限] 分钟（STATU
 
 const AGENT_NAMES = {
   Chatter: "聊天管家", InformationProcessor: "信息处理", Researcher: "信息收集",
-  BookingButler: "MCP 专项", Planner: "计划规划", TeamRunner: "调度器",
+  BookingButler: "MCP 专项", Planner: "计划规划", Designer: "版面设计", TeamRunner: "调度器",
 };
 
 /* ---------- WebSocket ---------- */
@@ -174,9 +174,13 @@ function addDraft(html) {
 
 function addFinal(m) {
   document.querySelectorAll(".final-card").forEach((n) => n.remove());
+  const srcNote = m.render_source === "designer" ? "✨ AI 设计师排版"
+    : m.render_source && m.render_source.startsWith("template") ? "🎨 模板排版"
+    : "";
+  const srcHtml = srcNote ? `<span class="chip chip-ok" style="margin-left:8px">${srcNote}</span>` : "";
   const div = document.createElement("div");
   div.className = "final-card";
-  div.innerHTML = `<div class="final-title">🎉 行程计划已生成</div>
+  div.innerHTML = `<div class="final-title">🎉 行程计划已生成${srcHtml}</div>
     <a class="btn-pdf" href="${m.pdf_url}" target="_blank">📄 打开 PDF 行程计划</a>
     <div style="font-size:12px;color:var(--sub)">已勾选订单合计约 ${m.total_price} 元，请在官方渠道逐项确认并支付。</div>`;
   chat.appendChild(div);

@@ -254,10 +254,15 @@ def get_model_client() -> ChatCompletionClient:
 
 def total_tokens() -> int:
     """本次进程累计 token 消耗（prompt + completion，主备聚合）。"""
+    u = usage_snapshot()
+    return u.prompt_tokens + u.completion_tokens
+
+
+def usage_snapshot() -> RequestUsage:
+    """进程累计用量快照（主备聚合）；局部链路（如 Designer）取前后差值即得自身消耗。"""
     if _client is None:
-        return 0
-    usage = _client.total_usage()
-    return usage.prompt_tokens + usage.completion_tokens
+        return RequestUsage(prompt_tokens=0, completion_tokens=0)
+    return _client.total_usage()
 
 
 # 单次规划计数基线（2026-08-31）：熔断语义为"单次完整规划"（§2.3），而底层客户端计数器
