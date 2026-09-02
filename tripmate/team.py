@@ -459,7 +459,7 @@ async def _deliver_final(ctx: TeamContext) -> str:
     if not prof.draft:
         return _ok(status="error", error="黑板无草稿")
     path = await asyncio.to_thread(
-        build_pdf, prof.model_copy(deep=True), ctx.run_id)
+        build_pdf, prof.model_copy(deep=True), ctx.run_id, prof.basic_info.template)
     # to_thread：reportlab 渲染是同步重活，内联执行会冻结整个事件循环（所有会话的推送全停摆）；
     # 深拷贝快照隔离渲染期间的用户并发写黑板（阻塞版的隐含串行安全性随线程化消失）
     orders = []

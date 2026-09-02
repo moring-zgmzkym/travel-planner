@@ -88,6 +88,29 @@ async function createSession() {
   } catch (e) { addTimeline("System", "STATUS_ERROR", "新对话创建失败，请重试。"); }
 }
 
+/* ---------- 路书样式（PDF 模板选择） ---------- */
+async function loadTemplates() {
+  try {
+    const r = await fetch("/api/templates");
+    const data = await r.json();
+    const sel = $("template-select");
+    const current = sel.value;
+    sel.innerHTML = "";
+    for (const t of data.templates || []) {
+      const opt = document.createElement("option");
+      opt.value = t.name;
+      opt.textContent = `🎨 路书样式：${t.display_name}`;
+      opt.title = `${t.description}（适用：${t.scenes}）`;
+      sel.appendChild(opt);
+    }
+    sel.value = current || "classic";
+  } catch (e) { /* 模板列表加载失败保留默认选项 */ }
+}
+
+function chooseTemplate(name) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "template", name }));
+}
+
 function handleMsg(m) {
   if (m.type === "session") {
     sid = m.sid;
@@ -278,5 +301,7 @@ input.addEventListener("keydown", (e) => {
 
 $("session-select").addEventListener("change", (e) => switchSession(e.target.value));
 $("new-session").addEventListener("click", createSession);
+$("template-select").addEventListener("change", (e) => chooseTemplate(e.target.value));
 
+loadTemplates();
 connect();

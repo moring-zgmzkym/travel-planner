@@ -18,6 +18,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from ..config import BASE_DIR, OUTPUT_DIR, ServerConfig
 from ..llm import usage_summary
+from ..pdf_templates import get_template, list_templates
 from ..planning import compute_budget
 from ..session import Session
 from ..status import event_json
@@ -86,6 +87,12 @@ async def profile(sid: str = DEFAULT_SID) -> JSONResponse:
 async def usage() -> JSONResponse:
     # 用量是进程级（共享模型客户端），不分会话
     return JSONResponse(usage_summary())
+
+
+@app.get("/api/templates")
+async def templates() -> JSONResponse:
+    """PDF 模板列表（前端下拉选择；定稿时按黑板 basic_info.template 渲染）。"""
+    return JSONResponse({"templates": list_templates()})
 
 
 def _render_draft_html(sess: Session) -> str:
@@ -233,6 +240,20 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         "补充信息后可重新启动。") if receipt["status"] == "cancelled" \
                     else "当前没有进行中的规划任务。"
                 await _send(ws, {"type": "chat", "role": "system", "text": text}, sess)
+            elif kind == "template":
+                name = (msg.get("name") or "").strip()
+                try:
+                    tpl = get_template(name or None)
+                except ValueError:
+                    await _send(ws, {"type": "chat", "role": "system",
+                                     "text": f"未知的模板样式 '{name}'，请重新选择。"}, sess)
+                    continue
+                await sess.bb.apply_basic_info(
+                    {"template": tpl.name}, "chatter", "用户选择 PDF 模板")
+                await _send(ws, {"type": "chat", "role": "system",
+                                 "text": f"已切换路书样式为「{tpl.display_name}」，定稿时将使用该模板。"},
+                            sess)
+                await _send(ws, {"type": "profile", "profile": sess.profile_snapshot()}, sess)
             elif kind == "chat":
                 text = (msg.get("text") or "").strip()
                 if not text:
