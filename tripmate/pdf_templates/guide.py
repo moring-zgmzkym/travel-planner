@@ -689,6 +689,10 @@ class GuideTemplate(BaseTripTemplate):
                 Paragraph(f"预算占用 {float(budget['occupancy'] or 0):.0%}（合计 {budget['total']:g} 元）",
                           st("gbarcap", 8, color=self.GRAY, spaceBefore=2)),
             ]))
+        chart = self.budget_charts(budget, party, basic.days or 1, basic.travel_dates)
+        if chart:
+            story.append(Spacer(1, 5))
+            story.append(Image(chart, width=CONTENT_W, height=CONTENT_W * 560 / 1500))
         for k, w in enumerate(budget["warnings"]):
             story.append(Paragraph(f'<font color="{GOLD_DEEP_HEX}">※</font> ' + w,
                                    st(f"gbw{k}", 9.5, color=self.WARN, spaceBefore=3)))
@@ -738,7 +742,10 @@ class GuideTemplate(BaseTripTemplate):
             foods += g.foods
         seen_f: set[str] = set()
         uniq_foods = [f for f in foods if not (f in seen_f or seen_f.add(f))]
-        if uniq_foods:
+        food_blocks = self.food_map(profile)
+        if food_blocks:
+            story.extend(food_blocks)
+        elif uniq_foods:
             story.append(self.food_grid(uniq_foods))
         else:
             # 结构化字段为空时回退展示目的地相关搜索结果标题（诚实标注）

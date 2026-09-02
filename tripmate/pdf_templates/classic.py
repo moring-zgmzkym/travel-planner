@@ -185,6 +185,10 @@ class ClassicTemplate(BaseTripTemplate):
                 Paragraph(f"预算占用 {float(budget['occupancy'] or 0):.0%}（合计 {budget['total']:g} 元）",
                           st("barcap", 8, color=self.GRAY, spaceBefore=2)),
             ]))
+        chart = self.budget_charts(budget, party, basic.days or 1, basic.travel_dates)
+        if chart:
+            story.append(Spacer(1, 5))
+            story.append(Image(chart, width=CONTENT_W, height=CONTENT_W * 560 / 1500))
         for w in budget["warnings"]:
             story.append(Paragraph("※ " + w, st("bwarn", 9.5, color=self.WARN, spaceBefore=3)))
         story.append(Spacer(1, 7))
@@ -251,7 +255,10 @@ class ClassicTemplate(BaseTripTemplate):
             foods += g.foods
         seen_f: set[str] = set()
         uniq_foods = [f for f in foods if not (f in seen_f or seen_f.add(f))]
-        if uniq_foods:
+        food_blocks = self.food_map(profile)
+        if food_blocks:
+            story.extend(food_blocks)
+        elif uniq_foods:
             story.append(self.food_grid(uniq_foods))
         else:
             # 真实搜索通道结构化字段为空时，回退展示标题含目的地的搜索结果（诚实标注，纯展示，

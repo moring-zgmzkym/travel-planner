@@ -19,8 +19,9 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (Image, Paragraph, SimpleDocTemplate, Table,
-                                TableStyle)
+from reportlab.platypus import (Image, KeepTogether, Paragraph, SimpleDocTemplate,
+                                Spacer, Table, TableStyle)
+from xml.sax.saxutils import escape as xml_escape
 
 from ..config import OUTPUT_DIR
 from ..models import TravelProfile
@@ -357,6 +358,233 @@ class BaseTripTemplate:
         t = Table(rows, colWidths=[CONTENT_W / per_row] * per_row)
         t.setStyle(TableStyle(cmds))
         return t
+
+    # ---- 美食地图（左图右文卡；数据全部来自检索原文的确定性提取，不编造）----
+
+    _SENT_SPLIT = re.compile(r"[。；;！!\n]")
+
+    def _price_in(self, text: str) -> str:
+        m = re.search(r"人均\s*[¥￥]?\s*(\d{1,4}(?:\s*[–—~-]\s*\d{1,4})?)", text)
+        if m:
+            return f"人均 ¥{m.group(1).replace(' ', '')}"
+        m = re.search(r"[¥￥]\s*(\d{1,4}(?:\s*[–—~-]\s*\d{1,4})?)", text)
+        return f"¥{m.group(1).replace(' ', '')}" if m else ""
+
+    def extract_food_entries(self, profile: TravelProfile) -> list[dict]:
+        """从黑板确定性提取美食条目（渲染层后处理，不新增外部调用）。
+
+        两级来源：① guide_digest.foods 菜名 → 在 raw_answer 原文找含该菜名的句子
+        作描述、就近提取 ¥ 金额作人均；② foods 为空时 → 从美食相关来源的
+        raw_answer 摘取含 人均/¥/必吃/推荐/招牌 的原句作线索卡。全部为检索原文
+        内容并标注来源，宁缺毋滥（提不出就返回空，调用方回退 food_grid）。"""
+        entries: list[dict] = []
+        seen: set[str] = set()
+        for g in profile.guide_digest:
+            if not g.foods:
+                continue
+            sents = [s.strip() for s in self._SENT_SPLIT.split(g.raw_answer or "") if s.strip()]
+            for f in g.foods[:8]:
+                f = str(f).strip()
+                if not f or f in seen:
+                    continue
+                hit = next((s for s in sents if f in s), "")
+                seen.add(f)
+                entries.append({"name": f, "desc": hit[:96], "price": self._price_in(hit),
+                                "source": g.source_name})
+        if not entries:
+            for g in profile.guide_digest:
+                if "美食" not in (g.source_name or "") and not any("美食" in (t or "") for t in g.raw_titles):
+                    continue
+                sents = [s.strip() for s in self._SENT_SPLIT.split(g.raw_answer or "") if s.strip()]
+                for s in sents:
+                    if not re.search(r"人均|[¥￥]\d|必吃|推荐|招牌", s) or len(s) < 8:
+                        continue
+                    m = re.search(r"[「『《“\"']([^」』》”\"']{2,14})[」』》”\"']", s)
+                    name = (m.group(1) if m else re.split(r"[，,、：:]", s)[0][:14]).strip()
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    entries.append({"name": name, "desc": s[:96], "price": self._price_in(s),
+                                    "source": g.source_name})
+                    if len(entries) >= 6:
+                        break
+                if len(entries) >= 6:
+                    break
+        return entries[:6]
+
+    def food_photo(self, name: str, profile: TravelProfile) -> str:
+        """按名称与实拍图分区模糊匹配美食图；无匹配返回空串（走占位卡）。"""
+        for img in profile.images:
+            spot = (img.spot or "").strip()
+            if img.path and name and spot and (name in spot or spot in name):
+                try:
+                    return self.crop_43(img.path)
+                except Exception:  # noqa: BLE001
+                    return ""
+        return ""
+
+    def food_placeholder(self, name: str) -> str:
+        """美食占位卡（PIL）：主题渐变底 + 菜名首字大字 + 「示意」角标（诚实标注非实拍）。"""
+        w, h = 520, 390
+        key = hashlib.md5(f"{self.name}|{self.PRIMARY_HEX}|{name}|v1".encode()).hexdigest()[:12]
+        out = CROP_DIR / f"foodph_{key}.jpg"
+        try:
+            if not out.exists():
+                CROP_DIR.mkdir(parents=True, exist_ok=True)
+                base = PILImage.new("RGB", (w, h))
+                px = base.load()
+                for y in range(h):
+                    t = y / (h - 1)
+                    row = tuple(int(a + (b - a) * t) for a, b in zip(self.COVER_TOP_RGB, self.COVER_BOT_RGB))
+                    for x in range(w):
+                        px[x, y] = row
+                d = ImageDraw.Draw(base)
+                ch = (name or "美食")[0]
+                draw_center(d, w, (h - 170) // 2 - 16, ch, pil_font(170), (255, 255, 255))
+                d.rounded_rectangle((w - 122, h - 60, w - 18, h - 18), radius=10,
+                                    outline=(255, 255, 255), width=2)
+                d.text((w - 104, h - 52), "示意", font=pil_font(26), fill=(255, 255, 255))
+                base.save(out, quality=88)
+            return str(out)
+        except Exception:  # noqa: BLE001 — 占位卡失败走文字降级
+            return ""
+
+    def food_card(self, entry: dict, profile: TravelProfile) -> Table:
+        """左图右文美食卡（复刻参考版式）：左 52mm 图（实拍或示意占位卡），
+        右侧菜名大字 + 人均金标 + 原文描述 + 来源小字。"""
+        name = str(entry.get("name") or "美食推荐")[:20]
+        photo = self.food_photo(name, profile) or self.food_placeholder(name)
+        left = []
+        if photo:
+            try:
+                left.append([Image(photo, width=52 * mm, height=39 * mm)])
+            except Exception:  # noqa: BLE001
+                left.append([Paragraph("图片暂缺", self.style("fnoimg", 9, color=self.GRAY))])
+        else:
+            left.append([Paragraph("图片暂缺", self.style("fnoimg", 9, color=self.GRAY))])
+        right: list = [[Paragraph(xml_escape(name), self.style("fname", 12, bold=True,
+                                                               color=self.PRIMARY))]]
+        if entry.get("price"):
+            right.append([Paragraph(xml_escape(entry["price"]),
+                                    self.style("fprice", 9.5, bold=True, color=self.ACCENT))])
+        if entry.get("desc"):
+            right.append([Paragraph(xml_escape(entry["desc"]),
+                                    self.style("fdesc", 9, leading=13, spaceBefore=2))])
+        right.append([Paragraph(f"来源：{xml_escape(str(entry.get('source') or ''))}",
+                                self.style("fsrc", 7.5, color=self.GRAY, leading=10))])
+        card = Table([[left, right]], colWidths=[56 * mm, CONTENT_W - 56 * mm])
+        card.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.5, self.HAIRLINE),
+            ("LINEABOVE", (0, 0), (-1, 0), 2, self.ACCENT),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        return card
+
+    def food_map(self, profile: TravelProfile) -> list:
+        """美食地图区块：提取到条目 → 左图右文卡列表；提不出返回 []（调用方回退 food_grid）。"""
+        blocks = []
+        for e in self.extract_food_entries(profile):
+            blocks.append(KeepTogether([self.food_card(e, profile), Spacer(1, 4)]))
+        return blocks
+
+    # ---- 预算双图表（PIL 绘制，无新依赖）----
+
+    def _chart_rgb(self, c) -> tuple:
+        return (int(c.red * 255), int(c.green * 255), int(c.blue * 255))
+
+    def budget_charts(self, budget: dict, party: int, days: int,
+                      dates: list | None = None) -> str:
+        """左「人均实花构成」环图 + 右「分日支出节奏」柱状图（复刻参考版式）。
+
+        分日节奏为预算口径的确定性估算：交通计 D1、住宿按晚分摊（首晚计 D1）、
+        其余科目按天均摊——图内明示「按预算口径估算」，不冒充实测数据。
+        返回图片路径；数据不足/绘制失败返回空串（调用方跳过图表）。"""
+        items = [r for r in (budget.get("items") or []) if r.get("amount")]
+        party = max(int(party or 1), 1)
+        days = max(int(days or 1), 1)
+        if not items:
+            return ""
+        key = hashlib.md5((f"{self.name}|{party}|{days}|" +
+                           "|".join(f"{r['item']}:{r['amount']:g}" for r in items)).encode()
+                          ).hexdigest()[:12]
+        out = CROP_DIR / f"budget_chart_{key}.jpg"
+        try:
+            if out.exists():
+                return str(out)
+            CROP_DIR.mkdir(parents=True, exist_ok=True)
+            W, H = 1500, 560
+            img = PILImage.new("RGB", (W, H), (255, 255, 255))
+            d = ImageDraw.Draw(img)
+            palette = [self._chart_rgb(c) for c in (self.PRIMARY, self.ACCENT, self.SUCCESS,
+                                                    self.WARN, colors.HexColor("#7c6bb0"),
+                                                    self.GRAY)]
+            f_t, f_n, f_s = pil_font(30), pil_font(24), pil_font(20)
+            ink, sub = (40, 40, 46), (110, 110, 118)
+            # -- 左：人均构成环图 --
+            d.text((40, 24), "人均实花构成", font=f_t, fill=ink)
+            per = [(str(r["item"]), float(r["amount"]) / party) for r in items]
+            per_total = sum(v for _, v in per) or 1.0
+            cx, cy, R, r0 = 255, 310, 185, 103
+            start = -90.0
+            for i, (_lab, v) in enumerate(per):
+                sweep = max(v / per_total * 360.0, 0.5)
+                d.pieslice([cx - R, cy - R, cx + R, cy + R], start, start + sweep,
+                           fill=palette[i % len(palette)])
+                start += sweep
+            d.ellipse([cx - r0, cy - r0, cx + r0, cy + r0], fill=(255, 255, 255))
+            amt = f"≈ ¥{per_total:,.0f}"
+            d.text((cx - d.textlength("人均实花", font=f_s) / 2, cy - 44), "人均实花",
+                   font=f_s, fill=sub)
+            d.text((cx - d.textlength(amt, font=f_t) / 2, cy - 8), amt, font=f_t, fill=(30, 30, 36))
+            lx, ly = 480, 160
+            for i, (lab, v) in enumerate(per[:6]):
+                d.rectangle([lx, ly + 4, lx + 22, ly + 26], fill=palette[i % len(palette)])
+                d.text((lx + 34, ly), f"{lab}  ¥{v:,.0f} · {v / per_total:.0%}",
+                       font=f_n, fill=(60, 60, 66))
+                ly += 50
+            # -- 右：分日支出柱状图 --
+            bx0 = 850
+            d.text((bx0, 24), "分日支出节奏（按预算口径估算）", font=f_t, fill=ink)
+            per_day = [0.0] * days
+            other = 0.0
+            nights = max(days - 1, 0)
+            for r in items:
+                lab, amt_v = str(r["item"]), float(r["amount"])
+                if "交通" in lab:
+                    per_day[0] += amt_v
+                elif "住宿" in lab and nights:
+                    for n in range(nights):
+                        per_day[min(n, days - 1)] += amt_v / nights
+                else:
+                    other += amt_v
+            for i in range(days):
+                per_day[i] += other / days
+            max_v = max(per_day) or 1.0
+            plot_x0, plot_x1, plot_y0, plot_y1 = bx0 + 20, W - 60, 130, 455
+            for i, v in enumerate(per_day):
+                cx_i = plot_x0 + (plot_x1 - plot_x0) * (i + 0.5) / days
+                bw = min((plot_x1 - plot_x0) / days * 0.52, 120)
+                top = plot_y1 - (plot_y1 - plot_y0) * v / max_v
+                d.rectangle([cx_i - bw / 2, top, cx_i + bw / 2, plot_y1],
+                            fill=palette[i % len(palette)])
+                vt = f"¥{v:,.0f}"
+                d.text((cx_i - d.textlength(vt, font=f_n) / 2, top - 36), vt,
+                       font=f_n, fill=(50, 50, 56))
+                lab = f"D{i + 1}"
+                if dates and i < len(dates) and dates[i]:
+                    lab += f" · {str(dates[i])[5:]}"
+                d.text((cx_i - d.textlength(lab, font=f_s) / 2, plot_y1 + 14), lab,
+                       font=f_s, fill=(90, 90, 96))
+            d.line([plot_x0 - 14, plot_y1, plot_x1, plot_y1], fill=(180, 180, 186), width=2)
+            note = ("大头在 D1（往返交通+首晚房费），其余科目按天均摊" if days > 1
+                    else "单日行程：全部支出计入 D1")
+            d.text((bx0, plot_y1 + 56), note, font=f_s, fill=(130, 130, 136))
+            img.save(out, quality=90)
+            return str(out)
+        except Exception:  # noqa: BLE001 — 图表失败不影响 PDF 主体
+            return ""
 
     # ---- 封面（主题渐变底 + 实拍条；子类可覆写）----
 
