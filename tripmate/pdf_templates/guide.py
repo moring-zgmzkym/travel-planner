@@ -738,15 +738,16 @@ class GuideTemplate(BaseTripTemplate):
             foods += g.foods
         seen_f: set[str] = set()
         uniq_foods = [f for f in foods if not (f in seen_f or seen_f.add(f))]
-        foods_text = "、".join(uniq_foods[:12])
-        if not foods_text:
+        if uniq_foods:
+            story.append(self.food_grid(uniq_foods))
+        else:
             # 结构化字段为空时回退展示目的地相关搜索结果标题（诚实标注）
             dest = basic.destination or ""
             titles = [t for g in profile.guide_digest for t in g.raw_titles if t and dest and dest in t]
             titles = list(dict.fromkeys(titles))[:5]
             foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
                 else "暂无（攻略通道未返回）"
-        story.append(Paragraph(foods_text, st("gfoods", 9.5, spaceBefore=3)))
+            story.append(Paragraph(foods_text, st("gfoods", 9.5, spaceBefore=3)))
         story.append(Spacer(1, 8))
 
         story.append(Paragraph("注意事项", st("gwarnt", 11, bold=True, color=self.ACCENT)))

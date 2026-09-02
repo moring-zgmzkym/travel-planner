@@ -251,8 +251,9 @@ class ClassicTemplate(BaseTripTemplate):
             foods += g.foods
         seen_f: set[str] = set()
         uniq_foods = [f for f in foods if not (f in seen_f or seen_f.add(f))]
-        foods_text = "、".join(uniq_foods[:12])
-        if not foods_text:
+        if uniq_foods:
+            story.append(self.food_grid(uniq_foods))
+        else:
             # 真实搜索通道结构化字段为空时，回退展示标题含目的地的搜索结果（诚实标注，纯展示，
             # 过滤 Tavily 对 site: 限定遵守不严带来的无关结果）
             dest = basic.destination or ""
@@ -260,7 +261,7 @@ class ClassicTemplate(BaseTripTemplate):
             titles = list(dict.fromkeys(titles))[:5]
             foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
                 else "暂无（攻略通道未返回）"
-        story.append(Paragraph(foods_text, st("foods", 10)))
+            story.append(Paragraph(foods_text, st("foods", 10)))
         story.append(Spacer(1, 6))
 
         warns: list[str] = []

@@ -325,6 +325,39 @@ class BaseTripTemplate:
         ]))
         return t
 
+    # ---- 美食卡片网格（柒 美食章节专用积木）----
+
+    def food_grid(self, foods: list[str], per_row: int = 4, limit: int = 12) -> Table | None:
+        """美食卡片网格：每格主题色顶条 + 浅底细描边卡 + 居中粗体菜名。
+
+        菜名来自攻略搜索（外部文本），先做 XML 转义再进 Paragraph 标记，
+        防止含 <、& 的名称导致 paraparser 崩溃（审查建议 4 的局部落实）。
+        空列表返回 None（调用方走诚实回退文案）。"""
+        items = [str(f).strip() for f in foods[:limit] if str(f).strip()]
+        if not items:
+            return None
+        from xml.sax.saxutils import escape
+        cell_style = self.style("foodcell", 9.5, bold=True, alignment=TA_CENTER)
+        rows, cmds = [], [
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ]
+        for r in range(0, len(items), per_row):
+            chunk = items[r:r + per_row]
+            cells = [Paragraph(escape(f), cell_style) for f in chunk]
+            for ci in range(len(cells)):
+                ri = r // per_row
+                cmds += [("BACKGROUND", (ci, ri), (ci, ri), self.BG_LIGHT),
+                         ("LINEABOVE", (ci, ri), (ci, ri), 2, self.ACCENT),
+                         ("BOX", (ci, ri), (ci, ri), 0.5, self.HAIRLINE)]
+            while len(cells) < per_row:
+                cells.append("")
+            rows.append(cells)
+        t = Table(rows, colWidths=[CONTENT_W / per_row] * per_row)
+        t.setStyle(TableStyle(cmds))
+        return t
+
     # ---- 封面（主题渐变底 + 实拍条；子类可覆写）----
 
     def cover_base(self) -> PILImage.Image:

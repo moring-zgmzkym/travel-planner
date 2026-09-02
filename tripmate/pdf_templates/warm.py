@@ -299,25 +299,7 @@ class WarmTemplate(BaseTripTemplate):
         seen_f: set[str] = set()
         uniq_foods = [f for f in foods if not (f in seen_f or seen_f.add(f))]
         if uniq_foods:
-            # 暖色美食色块网格（4 列）
-            chip_rows = []
-            items = uniq_foods[:12]
-            for r in range(0, len(items), 4):
-                row = items[r:r + 4]
-                cells = [Paragraph(f, st("chip", 9.5, bold=True, color=self.PRIMARY,
-                                         alignment=TA_CENTER)) for f in row]
-                while len(cells) < 4:
-                    cells.append("")
-                chip_rows.append(cells)
-            ct = Table(chip_rows, colWidths=[CONTENT_W / 4] * 4)
-            ct.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), self.BG_LIGHT),
-                ("BOX", (0, 0), (-1, -1), 0.5, self.HAIRLINE),
-                ("INNERGRID", (0, 0), (-1, -1), 0.5, self.HAIRLINE),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]))
-            story.append(ct)
+            story.append(self.food_grid(uniq_foods))
         else:
             # 真实搜索通道结构化字段为空时，回退展示标题含目的地的搜索结果（诚实标注，纯展示）
             dest = basic.destination or ""
