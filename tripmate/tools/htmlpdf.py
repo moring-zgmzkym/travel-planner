@@ -67,13 +67,19 @@ _ALLOWED_ATTRS: dict[str, set[str]] = {
 }
 _GLOBAL_ATTRS = {"class", "id", "style", "title"}
 _VOID = {"br", "hr", "img"}
+# _DROP_WITH_CONTENT 中的 void 标签（无结束标签）：只记数不置 _drop_depth，
+# 否则后续全文被静默吞掉（LLM 偶发 <meta> 即致整篇丢失还烧重试预算）
+_DROP_VOID = {"meta", "link", "base", "embed", "source", "input"}
 # 整节点连同内容删除的标签（HTMLParser 对其内容按 CDATA/普通处理，需显式跳过）
 _DROP_WITH_CONTENT = {"script", "iframe", "noscript", "object", "embed", "applet",
                       "form", "template", "head", "base", "meta", "link",
-                      "source", "picture", "button", "input", "select", "textarea"}
+                      "source", "picture", "button", "input", "select", "textarea",
+                      "foreignobject"}  # SVG 内嵌 HTML 容器（D6：预算图只许纯 SVG，禁 foreignObject）
 
-_CSS_URL_RE = re.compile(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)")
-_CSS_IMPORT_RE = re.compile(r"@import[^;{]*(;|(?=\}))", re.IGNORECASE)
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_CSS_URL_RE = re.compile(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", re.IGNORECASE)
+_CSS_IMPORT_RE = re.compile(
+    r"@import\s+(?:url\([^)]*\)|\"[^\"]*\"|'[^']*')[^;{}]*;?", re.IGNORECASE)
 _DATA_URI_RE = re.compile(r"^data:image/(png|jpeg);base64,", re.IGNORECASE)
 
 
@@ -149,12 +155,16 @@ def _css_unescape(css: str) -> str:
 def _css_clean(css: str, findings: list[str]) -> str:
     """<style> 文本 / style 属性清洗：禁 @import；url() 仅允许白名单 file URI 与 data:image。
 
-    先解码 CSS 转义再匹配（评审 #2：`@\\69 mport` 形式的转义绕过）。
+    先解码 CSS 转义再匹配（评审 #2：`@\\69 mport` 形式的转义绕过）；
+    再剥 `/* */` 注释（`u/**/rl(...)`、`@/**/import` 分割绕过对 CSS 词法无效，
+    注释剥除后即现形）；残留 @import 一律 fail-closed（未知形态不保留）。
     """
     css = _css_unescape(css)
+    css = _CSS_COMMENT_RE.sub("", css)
     css = _CSS_IMPORT_RE.sub("", css)
-    if "@import" in css.lower():
-        findings.append("CSS 仍含 @import（已无法安全剥离，请检查）")
+    if re.search(r"@import\b", css, re.IGNORECASE):
+        findings.append("CSS 含无法识别形态的 @import，已整体丢弃该段样式")
+        return ""
 
     def _sub(m: re.Match) -> str:
         val = (m.group(1) or "").strip()
@@ -218,6 +228,13 @@ class _AllowlistParser(HTMLParser):
                 if not value.strip().startswith("#"):  # SVG 内部引用放行，外部一律剥除
                     self.removed += 1
                     continue
+            if name in ("fill", "stroke"):
+                # SVG 表现属性外部 url()：仅 url(#...) 内部渐变引用合法，其余剥除
+                compact = low.replace(" ", "")
+                if "url(" in compact and "url(#" not in compact:
+                    self.findings.append(f"SVG 外部资源引用已剥除：{tag}.{name}")
+                    self.removed += 1
+                    continue
             if name == "style":
                 value = _css_clean(value, self.findings)
             out.append((name, value))
@@ -261,8 +278,9 @@ class _AllowlistParser(HTMLParser):
                 self._drop_depth += 1
             return
         if tag in _DROP_WITH_CONTENT:
-            self._drop_depth = 1
             self.removed += 1
+            if tag not in _DROP_VOID:
+                self._drop_depth = 1
             return
         if tag not in _ALLOWED_ATTRS:
             self.removed += 1
@@ -291,7 +309,14 @@ class _AllowlistParser(HTMLParser):
             return
         parts = [tag] + [f'{n}="{v.replace("&", "&amp;").replace(chr(34), "&quot;")}"'
                          for n, v in clean]
-        self.out.append(f"<{' '.join(parts)}/>")
+        if tag in _VOID:
+            self.out.append(f"<{' '.join(parts)}/>")
+        elif tag == "style":
+            self.out.append(f"<style></style>")
+        else:
+            # 非 void 标签的自闭合写法（<div/>）：HTML 词法按普通开始标签处理，
+            # 照此原样输出开始标签，避免凭空产生未闭合嵌套破坏版式
+            self.out.append(f"<{' '.join(parts)}>")
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -392,14 +417,41 @@ def _render_playwright(html_path: Path, pdf_path: Path, goto_timeout_s: float) -
             console_errors: list[str] = []
             page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
             page.goto(html_path.resolve().as_uri(), wait_until="load", timeout=goto_timeout_s * 1000)
-            # Spike 0.3 实测：@page 边距优先于 pdf() margin 参数，版式以 print.css 为准；
-            # 注意 page.pdf() 无 timeout 参数（1.58 实测）——挂死由外层 asyncio 熔断兜底，
-            # 渲染线程可能残留（已知边界），信号量获取超时防止后续定稿被永久阻塞
+            # Spike 0.3 实测：@page 边距优先于 pdf() margin 参数，版式以 print.css 为准
             page.pdf(path=str(pdf_path), format="A4", print_background=True,
                      prefer_css_page_size=True, display_header_footer=False)
             return console_errors[:10]
         finally:
             browser.close()
+
+
+def _render_playwright_bounded(html_path: Path, pdf_path: Path, goto_timeout_s: float,
+                               pdf_timeout_s: float) -> list[str]:
+    """page.pdf() 无 timeout 参数（1.58 实测）：daemon 线程 join 限时，超时即放弃并抛错。
+
+    持锁线程永不被挂死阻塞——render_html_pdf 的 finally 照常释放信号量，渲染通道自愈；
+    代价是挂死的浏览器线程残留（daemon，随进程退出回收；playwright 线程亲和，
+    不可跨线程 close）。挂死是小概率事件，一次泄漏换整通道可用是合算的 trade-off。
+    """
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            box["result"] = _render_playwright(html_path, pdf_path, goto_timeout_s)
+        except Exception as exc:  # noqa: BLE001 — 转交调用方统一进 Edge 兜底
+            box["error"] = exc
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(timeout=goto_timeout_s + pdf_timeout_s)
+    if th.is_alive():
+        AUDIT.output("HtmlPdf",
+                     f"Playwright 渲染超时（>{goto_timeout_s + pdf_timeout_s:.0f}s），"
+                     "已放弃等待（残留线程随进程退出回收），降级 Edge CLI")
+        raise RuntimeError("Playwright 渲染超时")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result", [])
 
 
 def _render_edge(html_path: Path, pdf_path: Path, timeout_s: float) -> bool:
@@ -431,7 +483,7 @@ def _pdf_valid(pdf_path: Path) -> bool:
 
 def render_html_pdf(html_path: str | Path, pdf_path: str | Path,
                     goto_timeout_s: float = 30, edge_timeout_s: float = 90,
-                    sem_timeout_s: float = 120) -> dict:
+                    sem_timeout_s: float = 120, pdf_timeout_s: float = 90) -> dict:
     """渲染 HTML → PDF：Playwright 主通道，Edge CLI 兜底；失败返回 ok=False（不抛）。
 
     同步重活，调用方必须 asyncio.to_thread 执行（内联会冻结事件循环，见 team.py 注释）。
@@ -452,7 +504,8 @@ def render_html_pdf(html_path: str | Path, pdf_path: str | Path,
                 "error": "渲染通道被其他会话长时间占用，跳过本次渲染"}
     try:
         try:
-            console_errors = _render_playwright(html_path, pdf_path, goto_timeout_s)
+            console_errors = _render_playwright_bounded(
+                html_path, pdf_path, goto_timeout_s, pdf_timeout_s)
             if _pdf_valid(pdf_path):
                 return {"ok": True, "engine": "playwright", "pdf_path": str(pdf_path),
                         "console_errors": console_errors, "error": None}
@@ -476,10 +529,12 @@ def render_html_pdf(html_path: str | Path, pdf_path: str | Path,
 
 
 def inspect_pdf(pdf_path: str | Path, keywords: tuple[str, ...] = ("行程", "预算", "订单"),
-                max_pages: int = 40) -> dict:
+                max_pages: int = 40, days: int | None = None) -> dict:
     """确定性诊断（D3）：页数/关键词/溢出信号。PyMuPDF 缺失时优雅降级（审核 #15）。
 
-    溢出块计数为 best-effort 信号（仅明显越界），不作硬门槛；关键词缺失才判 not ok。
+    页数警告带按天数动态（2..days*6+6，超界仅警告不判失败）；days 未给出时
+    沿用固定的 40 页参考上限。溢出块计数为 best-effort 信号，不作硬门槛；
+    关键词缺失才判 not ok。
     """
     path = Path(pdf_path)
     if not _pdf_valid(path):
@@ -502,8 +557,11 @@ def inspect_pdf(pdf_path: str | Path, keywords: tuple[str, ...] = ("行程", "�
                     overflow += 1
     missing = [k for k in keywords if k not in text]
     warnings = []
-    if pages > max_pages:
-        warnings.append(f"页数 {pages} 超过参考上限 {max_pages}")
+    page_cap = days * 6 + 6 if days else max_pages
+    if pages > page_cap:
+        warnings.append(f"页数 {pages} 超过参考上限 {page_cap}")
+    if days and pages < 2:
+        warnings.append(f"页数 {pages} 疑似过少（{days} 天行程）")
     if overflow:
         warnings.append(f"{overflow} 个文本块疑似越界（best-effort 信号）")
     return {"ok": not missing, "pages": pages, "missing_keywords": missing,
@@ -511,13 +569,20 @@ def inspect_pdf(pdf_path: str | Path, keywords: tuple[str, ...] = ("行程", "�
 
 
 def render_and_inspect(html_path: str | Path, pdf_path: str | Path,
-                       keywords: tuple[str, ...] = ("行程", "预算", "订单")) -> dict:
-    """渲染 + 诊断一步完成（减少一次 LLM 往返）；返回有界 JSON（不回传全文）。"""
+                       keywords: tuple[str, ...] = ("行程", "预算", "订单"),
+                       days: int | None = None) -> dict:
+    """渲染 + 诊断一步完成（减少一次 LLM 往返）；返回有界 JSON（不回传全文）。
+
+    console_errors 透传（Playwright 侧已截断 ≤10 条）：JS/资源错误是修正轮的
+    关键修复信号，不可丢弃。
+    """
     render = render_html_pdf(html_path, pdf_path)
     if not render["ok"]:
-        return {"ok": False, "stage": "render", "error": render["error"]}
-    diag = inspect_pdf(pdf_path, keywords=keywords)
+        return {"ok": False, "stage": "render", "error": render["error"],
+                "console_errors": render.get("console_errors", [])}
+    diag = inspect_pdf(pdf_path, keywords=keywords, days=days)
     diag["stage"] = "inspect"
     diag["engine"] = render["engine"]
     diag["pdf_path"] = render["pdf_path"]
+    diag["console_errors"] = render.get("console_errors", [])
     return diag

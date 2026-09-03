@@ -1,4 +1,4 @@
-"""9 类组件标准片段（Designer 提示词的 few-shot 素材，docs/html-designer-plan.md 任务 1.2）。
+"""10 段组件素材（Designer 提示词的 few-shot 素材，docs/html-designer-plan.md 任务 1.2）。
 
 每个片段与 print.css 的类名一一对应；数据均为示意，Agent 用黑板快照数据仿写。
 """

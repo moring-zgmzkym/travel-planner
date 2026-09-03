@@ -38,7 +38,9 @@ def test_sanitize_strips_meta_base_iframe_and_nested_script():
             "<scr<script></script>ipt>alert(2)</script><b>保留</b>")
     r = sanitize_html(frag)
     assert "iframe" not in r.html and "base" not in r.html and "meta" not in r.html
-    assert "alert" not in r.html and "evil" not in r.html
+    # <scr<script> 分割在 void 标签不再吞文档后现形为无害文本（浏览器同样按未知元素+
+    # 文本处理，无 script 执行面）：断言无 script 标签残留，而非文本不可见
+    assert "<script" not in r.html.lower() and "evil" not in r.html
     assert "保留" in r.html
 
 
@@ -197,3 +199,118 @@ def test_inspect_missing_pdf():
 def test_print_css_loadable():
     css = load_print_css()
     assert "@page" in css and "break-inside" in css and "theme-mono" in css
+
+
+def test_print_css_locks_d1_promises():
+    """D1 承诺回归锁：A4 版式/中文字体栈/4 套主题，改丢即红。"""
+    css = load_print_css()
+    assert "size" in css and "A4" in css
+    assert "Microsoft YaHei" in css and "DengXian" in css and "SimSun" in css
+    for theme in ("theme-azure", "theme-warm", "theme-fresh", "theme-mono"):
+        assert theme in css
+
+
+def test_golden_sample_size_locked():
+    """金样体积回归锁：3–5K token 目标，超限即提示词隐性成本失控。"""
+    from tripmate.design import load_golden_sample
+    sample = load_golden_sample()
+    assert len(sample) < 10000  # 当前约 7.7K 字符，留余量但禁无声膨胀
+
+
+def test_sanitize_css_case_and_comment_bypass_blocked():
+    """CSS 大小写/注释分割绕过（复核 CONFIRMED）：外链一律剥除且有 finding。"""
+    r = sanitize_html('<style>p{background:URL("https://evil.com/t.png");color:red}</style>')
+    assert "evil.com" not in r.html and "color:red" in r.html
+    r2 = sanitize_html('<style>p{background:u/**/rl("https://evil.com/t.png")}</style>')
+    assert "evil.com" not in r2.html
+    r3 = sanitize_html('<style>@/**/import "https://evil.com/x.css";p{color:red}</style>')
+    assert "evil.com" not in r3.html.lower() and "color:red" in r3.html
+
+
+def test_sanitize_unterminated_import_dropped_fail_closed():
+    """EOF 结尾的 @import（合法 CSS）：剥除失败即整段丢弃，不 fail-open。"""
+    r = sanitize_html('<style>@import "https://evil.com/x.css"</style>')
+    assert "evil.com" not in r.html.lower()
+
+
+def test_sanitize_void_drop_tags_dont_swallow_document():
+    """void 型 drop 标签（meta/link/base）不得吞掉后续全文。"""
+    r = sanitize_html('<meta charset="x"><p>hello</p>')
+    assert "hello" in r.html
+    r2 = sanitize_html('<link rel="stylesheet" href="https://evil.com/x.css"><p>world</p>')
+    assert "world" in r2.html and "evil.com" not in r2.html
+
+
+def test_sanitize_svg_presentation_url_rules():
+    """SVG fill/stroke：外部 url() 剥除，内部 url(#...) 保留。"""
+    bad = sanitize_html('<svg><circle r="5" fill="url(https://evil.com/g)"/></svg>').html
+    assert "evil.com" not in bad
+    ok = sanitize_html('<svg><circle r="5" fill="url(#grad)"/></svg>').html
+    assert "url(#grad)" in ok
+
+
+def test_sanitize_self_closed_nonvoid_emits_open_tag():
+    """<div/> 按 HTML 词法是开始标签：输出开始标签，不凭空自闭合。"""
+    r = sanitize_html("<div/><p>x</p>")
+    assert "<div/>" not in r.html and "<div>" in r.html and "x" in r.html
+
+
+def test_sanitize_foreignobject_dropped_with_content():
+    """D6：SVG 内嵌 HTML 容器整节点丢弃（预算图只许纯 SVG）。"""
+    r = sanitize_html('<svg><foreignObject><div>inner</div></foreignObject>'
+                      '<circle r="5"/></svg>')
+    assert "inner" not in r.html and "<circle" in r.html
+
+
+def test_render_and_inspect_passes_console_errors(tmp_path, monkeypatch):
+    """render_and_inspect 透传 console_errors（修正轮修复信号），成功/失败两路。"""
+    import tripmate.tools.htmlpdf as hpdf
+
+    fitz = pytest.importorskip("fitz")
+    pdf = tmp_path / "mini.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(pdf)
+    doc.close()
+
+    errs = ["ReferenceError: x is not defined"]
+
+    def _fake_render(html_path, pdf_path, **kw):
+        return {"ok": True, "engine": "playwright", "pdf_path": str(pdf),
+                "console_errors": errs, "error": None}
+
+    monkeypatch.setattr(hpdf, "render_html_pdf", _fake_render)
+    html = tmp_path / "x.html"
+    html.write_text("<p>x</p>", encoding="utf-8")
+    diag = hpdf.render_and_inspect(html, tmp_path / "o.pdf",
+                                   keywords=("不存在的关键词Ω",))
+    assert diag["console_errors"] == errs  # 关键词缺失也不丢信号
+
+    def _fake_fail(html_path, pdf_path, **kw):
+        return {"ok": False, "engine": "none", "pdf_path": "",
+                "console_errors": errs, "error": "boom"}
+
+    monkeypatch.setattr(hpdf, "render_html_pdf", _fake_fail)
+    bad = hpdf.render_and_inspect(html, tmp_path / "o2.pdf")
+    assert bad["console_errors"] == errs and bad["error"] == "boom"
+
+
+def test_inspect_days_page_band(tmp_path):
+    """D3 页数警告带 2..days*6+6；不给 days 沿用 40 页固定上限。"""
+    import tripmate.tools.htmlpdf as hpdf
+
+    fitz = pytest.importorskip("fitz")
+
+    def _pdf(n: int, name: str) -> Path:
+        p = tmp_path / name
+        doc = fitz.open()
+        for _ in range(n):
+            doc.new_page()
+        doc.save(p)
+        doc.close()
+        return p
+
+    many = _pdf(50, "many.pdf")
+    assert any("50" in w for w in hpdf.inspect_pdf(many, keywords=(), days=2)["warnings"])
+    assert hpdf.inspect_pdf(many, keywords=(), days=10)["warnings"] == []
+    assert hpdf.inspect_pdf(many, keywords=())["warnings"] != []  # 默认 40 上限仍生效

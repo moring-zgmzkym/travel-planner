@@ -246,7 +246,209 @@ def test_chain_agent_exception_consumes_budget_then_raises():
                             budget_check=lambda: None))
 
 
-def test_chain_budget_exceeded_falls_back_to_error():
+def test_write_html_too_large_branch(tmp_path):
+    """消毒器限额 → 工具层 too_large 映射（覆盖 designer.py:183-186）。"""
+    io = DesignerIO(run_id="testrun03", dest="成都")
+    tools = {t.__name__: t for t in make_designer_tools(io)}
+
+    async def _call():
+        frag = "<p>" + "x" * (513 * 1024) + "</p>" + "<!--TRIPMATE-END-->"
+        return json.loads(await tools["write_html"](frag))
+
+    out = _run(_call())
+    assert out["status"] == "too_large"
+    assert io.last_tool_error != "" and not io.wrote_html
+
+
+def _stub_render_ok(monkeypatch, engine: str = "stub"):
+    """无浏览器桩：render_and_inspect 按脚本返回 ok/失败（D4 核心语义脱离内核可测）。"""
+
+    def _fake(html_path, pdf_path, keywords=(), days=None):
+        if _fake.fail_next:
+            _fake.fail_next = False
+            return {"ok": False, "stage": "inspect", "error": "缺关键词",
+                    "missing_keywords": ["订单"], "overflow_blocks": 0,
+                    "warnings": [], "console_errors": []}
+        return {"ok": True, "stage": "inspect", "engine": engine,
+                "pdf_path": str(pdf_path), "pages": 4, "missing_keywords": [],
+                "overflow_blocks": 0, "warnings": [], "error": None,
+                "console_errors": []}
+
+    _fake.fail_next = False
+    monkeypatch.setattr(dmod, "render_and_inspect", _fake)
+    return _fake
+
+
+def test_chain_success_without_browser(tmp_path, monkeypatch):
+    """RENDER_SKIP 覆盖空洞：桩渲染下外循环成功路径不依赖浏览器。"""
+    _stub_render_ok(monkeypatch)
+    prof = _profile()
+    script = _factory({1: [("write_html", _valid_fragment(prof)), "render_pdf"]})
+    result = _run(designer_chain(prof, "run_stub", script, system_prompt="sys",
+                                 budget_check=lambda: None))
+    assert result.pdf_path and result.attempts == 1 and not result.from_cache
+
+
+def test_chain_fix_task_carries_snapshot_and_tool_error(tmp_path, monkeypatch):
+    """修正轮非盲写：任务含快照 uri 与上轮工具错误（复核缺陷 #1 回归锁）。"""
+    fake = _stub_render_ok(monkeypatch)
+    fake.fail_next = True  # 第 1 轮渲染诊断不达标（关键词缺失）
+    prof = _profile()
+    img = tmp_path / "cover.png"
+    img.write_bytes(b"x")
+    from tripmate.models import ImageItem
+    prof.images = [ImageItem(spot="大熊猫基地", path=str(img), source="实拍")]
+    seen: list[str] = []
+
+    def factory(system_prompt: str, tools: list):
+        tools_by_name = {t.__name__: t for t in tools}
+
+        class _Agent:
+            async def run(self, task: str = "") -> None:
+                seen.append(task)
+                if len(seen) == 1:
+                    await tools_by_name["write_html"](_valid_fragment(prof))
+                    await tools_by_name["render_pdf"]()
+                else:
+                    await tools_by_name["write_html"](_valid_fragment(prof))
+                    fake.fail_next = False
+                    await tools_by_name["render_pdf"]()
+        return _Agent()
+
+    result = _run(designer_chain(prof, "run_fixsnap", factory, system_prompt="sys",
+                                 budget_check=lambda: None))
+    assert result.attempts == 2
+    fix_task = seen[1]
+    assert "黑板快照" in fix_task and "file:///" in fix_task  # 有 uri 可抄
+    assert "组件片段库" not in fix_task  # 片段库/金样仍不带（上下文控制）
+
+
+def test_chain_fix_task_carries_truncation_error(tmp_path, monkeypatch):
+    """截断失败进修正轮时，任务携带工具错误而非空诊断。"""
+    _stub_render_ok(monkeypatch)
+    prof = _profile()
+    seen: list[str] = []
+
+    def factory(system_prompt: str, tools: list):
+        tools_by_name = {t.__name__: t for t in tools}
+
+        class _Agent:
+            async def run(self, task: str = "") -> None:
+                seen.append(task)
+                if len(seen) == 1:
+                    await tools_by_name["write_html"]("<section>截断了没有哨兵")
+                else:
+                    await tools_by_name["write_html"](_valid_fragment(prof))
+                    await tools_by_name["render_pdf"]()
+        return _Agent()
+
+    result = _run(designer_chain(prof, "run_trunc", factory, system_prompt="sys",
+                                 budget_check=lambda: None))
+    assert result.attempts == 2
+    assert "截断" in seen[1] and "黑板快照" in seen[1]
+
+
+def test_chain_cancelled_error_passthrough():
+    """chain 层 CancelledError 穿透（停止语义；except Exception 不得吞）。"""
+    import asyncio
+
+    prof = _profile()
+
+    def factory(system_prompt: str, tools: list):
+        class _Cancelled:
+            async def run(self, task: str = ""):
+                raise asyncio.CancelledError()
+        return _Cancelled()
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(designer_chain(prof, "run_cancel", factory, system_prompt="sys",
+                            budget_check=lambda: None))
+
+
+def test_chain_budget_exceeded_no_retry():
+    """agent.run 抛 TokenBudgetExceeded → 直接 DesignerError，不烧剩余轮次。"""
+    llm = pytest.importorskip("tripmate.llm")
+    prof = _profile()
+    calls = {"n": 0}
+
+    def factory(system_prompt: str, tools: list):
+        class _Boom:
+            async def run(self, task: str = ""):
+                calls["n"] += 1
+                raise llm.TokenBudgetExceeded("超 500K 上限")
+        return _Boom()
+
+    with pytest.raises(DesignerError, match="预算耗尽"):
+        _run(designer_chain(prof, "run_tbe", factory, system_prompt="sys",
+                            budget_check=lambda: None))
+    assert calls["n"] == 1
+
+
+def test_chain_soft_checkpoint_skips_only_when_no_html(tmp_path, monkeypatch):
+    """软检查点只拦“无 HTML 落盘”：已落盘的渲染失败仍允许修正轮。"""
+    monkeypatch.setattr(dmod, "SOFT_CHECKPOINT_S", -1)  # 首轮后一律超时
+    prof = _profile()
+
+    # A：首轮已落盘（渲染失败）→ 第 2 轮继续并成功
+    fake = _stub_render_ok(monkeypatch)
+    fake.fail_next = True
+    script = _factory({1: [("write_html", _valid_fragment(prof)), "render_pdf"],
+                       2: [("write_html", _valid_fragment(prof)), "render_pdf"]})
+    result = _run(designer_chain(prof, "run_soft_a", script, system_prompt="sys",
+                                 budget_check=lambda: None))
+    assert result.attempts == 2
+
+    # B：首轮截断（无落盘）→ 直接结束，不进修正轮（换画像避开 A 轮写入的缓存）
+    prof.draft.days[0].morning = "另一版行程"
+    script_b = _factory({"default": [("write_html", "<p>截断无哨兵</p>")]})
+    with pytest.raises(DesignerError):
+        _run(designer_chain(prof, "run_soft_b", script_b, system_prompt="sys",
+                            budget_check=lambda: None))
+    assert script_b.calls["n"] == 1
+
+
+def test_cache_key_version_bump_changes_key(tmp_path):
+    """管线版本升级必换键（print.css 改版式不命中旧缓存），天气稳定不抖键。"""
+    prof = _profile()
+    prof.weather = {"city": "成都", "source": "Open-Meteo（真实预报）",
+                    "reference_only": False,
+                    "days": [{"date": "2026-10-01", "day_text": "晴",
+                              "temp_min": 14, "temp_max": 22}]}
+    k1 = designer_cache_key(prof)
+    assert designer_cache_key(prof) == k1  # 同数据（含天气）同键
+    # 键读取的是 designer 模块绑定的版本号（from-import 快照），打桩点在此
+    import tripmate.design as design_pkg
+    try:
+        dmod.DESIGNER_PIPELINE_VERSION = dmod.DESIGNER_PIPELINE_VERSION + "+next"
+        assert designer_cache_key(prof) != k1
+    finally:
+        dmod.DESIGNER_PIPELINE_VERSION = design_pkg.DESIGNER_PIPELINE_VERSION
+
+
+def test_snapshot_projection_truncates_and_excludes(tmp_path):
+    """快照投影：酒店图转 uri、foods/来源截断、fetched_at 排除、天气透传。"""
+    from tripmate.models import GuideDigestItem, HotelCandidate, ImageItem
+    prof = _profile()
+    img = tmp_path / "hotel.png"
+    img.write_bytes(b"x")
+    prof.hotels.append(HotelCandidate(name=" missing 图", price_per_night=100.0,
+                                      distance_km=1.0, rating=4.0,
+                                      link="https://x", selected=True,
+                                      image_path=""))
+    prof.hotels[0].image_path = str(img)
+    prof.images = [ImageItem(spot="s", path=str(img), source="实拍")]
+    prof.guide_digest = [GuideDigestItem(
+        source_name="马蜂窝", source_url="https://x", fetched_at="2026-09-03T10:00:00",
+        foods=[f"菜{i}" for i in range(20)],
+        warnings=[f"注意{i}" for i in range(10)])]
+    prof.weather = {"city": "成都", "days": []}
+    snap = designer_snapshot(prof)
+    assert snap["selected_hotels"][0]["image_uri"].startswith("file:///")
+    assert snap["selected_hotels"][1]["image_uri"] == ""
+    assert len(snap["foods"]) <= 12 and len(snap["guide_warnings"]) <= 6
+    assert len(snap["guide_sources"]) <= 5
+    assert "fetched_at" not in json.dumps(snap)
+    assert snap["weather"]["city"] == "成都"
     prof = _profile()
     exceeded = {"n": 0}
 
@@ -276,6 +478,20 @@ def test_chain_cache_hit_reuses_html_without_llm(tmp_path):
     assert result.from_cache is True
     assert factory.calls["n"] == 0  # 缓存命中不重新生成
     cached.unlink(missing_ok=True)
+
+
+def test_chain_budget_exceeded_falls_back_to_error():
+    prof = _profile()
+    exceeded = {"n": 0}
+
+    def budget():
+        exceeded["n"] += 1
+        raise RuntimeError("token 消耗已超上限")
+
+    with pytest.raises(RuntimeError, match="超上限"):
+        _run(designer_chain(_profile(), "run_budget", _factory({"default": []}),
+                            system_prompt="sys", budget_check=budget))
+    assert exceeded["n"] == 1  # 首轮即熔断，不进循环
 
 
 def _run(coro):

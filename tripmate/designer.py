@@ -120,7 +120,8 @@ def designer_cache_key(prof: TravelProfile) -> str:
     """
     payload = {"v": DESIGNER_PIPELINE_VERSION, "mode": "designer",
                "snap": designer_snapshot(prof)}
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                     default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -138,6 +139,8 @@ class DesignerIO:
     pdf_path: Path = None  # type: ignore[assignment]
     last_render: dict = field(default_factory=dict)
     last_findings: list[str] = field(default_factory=list)
+    last_tool_error: str = ""   # write_html 最近一次失败原因（截断/超限），修正轮任务携带
+    days: int | None = None     # 行程天数，诊断页数警告带用（D3：2..days*6+6）
     wrote_html: bool = False
 
     def __post_init__(self) -> None:
@@ -175,6 +178,7 @@ def make_designer_tools(io: DesignerIO) -> list:
         truncated = SENTINEL not in html
         if truncated:
             # 哨兵缺失即判截断（比消毒失败更精确），不烧渲染
+            io.last_tool_error = "write_html 截断失败：未找到 TRIPMATE-END 哨兵"
             return json.dumps({"status": "truncated", "error":
                                "输出在结束前被截断（未找到 TRIPMATE-END 哨兵）。请更精简地重新输出完整片段："
                                "压缩文案、限制 SVG 复杂度，必要时省略非核心章节。"}, ensure_ascii=False)
@@ -183,11 +187,13 @@ def make_designer_tools(io: DesignerIO) -> list:
         try:
             result = sanitize_html(body)
         except HtmlTooLargeError as exc:
+            io.last_tool_error = f"write_html 超限：{exc}"
             return json.dumps({"status": "too_large", "error": str(exc)}, ensure_ascii=False)
         wrapped = wrap_html(result.html, title=f"行程计划_{io.dest or ''}", theme=theme)
         HTML_DIR.mkdir(parents=True, exist_ok=True)
         io.html_path.write_text(wrapped, encoding="utf-8")
         io.wrote_html = True
+        io.last_tool_error = ""
         io.last_findings = result.findings
         return json.dumps({
             "status": "written", "html_path": str(io.html_path),
@@ -204,7 +210,7 @@ def make_designer_tools(io: DesignerIO) -> list:
             return json.dumps({"ok": False, "error": "尚无已提交的 HTML，请先调用 write_html"},
                               ensure_ascii=False)
         report = await asyncio.to_thread(
-            render_and_inspect, io.html_path, io.pdf_path, KEYWORDS)
+            render_and_inspect, io.html_path, io.pdf_path, KEYWORDS, io.days)
         io.last_render = report
         if report.get("ok"):
             return json.dumps({"ok": True, "pdf_path": report["pdf_path"],
@@ -233,21 +239,32 @@ def _task_text_gen(snap: dict) -> str:
             "\n\n【金样（质量标杆，仿结构与表达密度，内容必须来自快照）】\n" +
             load_golden_sample() +
             "\n\n【黑板快照（唯一数据来源，禁止编造；图片 src 只用其中的 uri）】\n" +
-            _json.dumps(snap, ensure_ascii=False) +
+            _json.dumps(snap, ensure_ascii=False, default=str) +
             "\n\n请开始排版：先调用 write_html 提交完整 body 片段（以 TRIPMATE-END 结尾），"
             "再调用 render_pdf 查看诊断；诊断不达标则修正后重交（最多 2 轮修正）。")
 
 
-def _task_text_fix(state: dict) -> str:
-    """修正轮任务文本：只给诊断摘要与上版路径，不回传 HTML 全文（上下文膨胀控制）。"""
+def _task_text_fix(state: dict, snap: dict | None = None) -> str:
+    """修正轮任务文本：诊断摘要 + 上轮工具错误 + 最小快照（不回传 HTML 全文）。
+
+    每轮是全新无记忆的 Agent 实例（上下文膨胀控制），不带快照则拿不到图片 uri
+    与组件数据、修正不可执行——快照是修正轮的必要输入（片段库/金样仍不带）。
+    """
     prev = state.get("render") or {}
     findings = state.get("findings") or []
-    return ("上一版 HTML 未通过渲染诊断，请修正后重新提交完整 body 片段（write_html + render_pdf）。\n"
+    tool_error = state.get("tool_error") or ""
+    text = ("上一版 HTML 未通过渲染诊断，请修正后重新提交完整 body 片段（write_html + render_pdf）。\n"
             f"上一版文件：{state.get('html_path', '')}\n"
             f"诊断：{json.dumps(prev, ensure_ascii=False)[:400]}\n"
-            f"消毒发现：{json.dumps(findings[:8], ensure_ascii=False)[:300]}\n"
-            "注意：缺少章节关键词时补齐对应章节标题；被消毒剥除的元素请改用合规写法；"
-            "输出仍以 TRIPMATE-END 结尾。")
+            f"消毒发现：{json.dumps(findings[:8], ensure_ascii=False)[:300]}\n")
+    if tool_error:
+        text += f"工具错误：{tool_error[:200]}\n"
+    if snap is not None:
+        text += ("【黑板快照（唯一数据来源，禁止编造；图片 src 只用其中的 uri）】\n"
+                 f"{json.dumps(snap, ensure_ascii=False, default=str)}\n")
+    text += ("注意：缺少章节关键词时补齐对应章节标题；被消毒剥除的元素请改用合规写法；"
+             "输出仍以 TRIPMATE-END 结尾。")
+    return text
 
 
 async def designer_chain(prof: TravelProfile, run_id: str, agent_factory: AgentFactory,
@@ -265,6 +282,7 @@ async def designer_chain(prof: TravelProfile, run_id: str, agent_factory: AgentF
     dest = prof.basic_info.destination or ""
     io = DesignerIO(run_id=run_id, dest=dest)
     snap = designer_snapshot(prof)
+    io.days = len(prof.draft.days) if prof.draft and prof.draft.days else None
 
     async def _emit(text: str) -> None:
         if bus is not None:
@@ -281,7 +299,8 @@ async def designer_chain(prof: TravelProfile, run_id: str, agent_factory: AgentF
         HTML_DIR.mkdir(parents=True, exist_ok=True)
         io.html_path.write_text(cached.read_text(encoding="utf-8"), encoding="utf-8")
         io.wrote_html = True
-        report = await asyncio.to_thread(render_and_inspect, io.html_path, io.pdf_path, KEYWORDS)
+        report = await asyncio.to_thread(
+            render_and_inspect, io.html_path, io.pdf_path, KEYWORDS, io.days)
         if report.get("ok"):
             return DesignerResult(pdf_path=report["pdf_path"], html_path=str(io.html_path),
                                   engine=report.get("engine", ""), attempts=0, from_cache=True)
@@ -289,30 +308,41 @@ async def designer_chain(prof: TravelProfile, run_id: str, agent_factory: AgentF
 
     if budget_check is None:
         from .llm import check_budget as budget_check  # noqa: N813 — 共享单例，逐轮检查
+    try:
+        # 顶层不得 import llm（含 autogen 依赖）：延迟到链路启动时
+        from .llm import TokenBudgetExceeded as _BudgetExceeded
+    except ImportError:  # 无 autogen 环境：预算熔断只可能来自显式注入的 budget_check
+        _BudgetExceeded = None  # type: ignore[assignment]
 
     t0 = time.monotonic()
     attempt = 0
-    state: dict = {"render": None, "findings": [], "html_path": str(io.html_path)}
+    state: dict = {"render": None, "findings": [], "tool_error": "",
+                   "html_path": str(io.html_path)}
     last_error = "Designer 未产出任何渲染结果"
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         budget_check()
-        if attempt > 1 and (time.monotonic() - t0) > SOFT_CHECKPOINT_S:
-            AUDIT.output(AGENT_DESIGNER, f"软检查点：{SOFT_CHECKPOINT_S:.0f}s 仍未达标，停止修正轮")
+        if attempt > 1 and not io.wrote_html and (time.monotonic() - t0) > SOFT_CHECKPOINT_S:
+            AUDIT.output(AGENT_DESIGNER, f"软检查点：{SOFT_CHECKPOINT_S:.0f}s 仍无 HTML 落盘，停止修正轮")
             break
         await _emit(f"🎨 第 {attempt}/{MAX_ATTEMPTS} 轮版面设计中…")
         tools = make_designer_tools(io)
         agent = agent_factory(system_prompt, tools)
-        task = _task_text_gen(snap) if attempt == 1 else _task_text_fix(state)
+        task = _task_text_gen(snap) if attempt == 1 else _task_text_fix(state, snap)
         try:
             await agent.run(task=task)
         except Exception as exc:  # noqa: BLE001 — 模型调用失败计入共享预算，下一轮或回退
+            if _BudgetExceeded is not None and isinstance(exc, _BudgetExceeded):
+                # 预算耗尽：后续每轮首行的 budget_check() 必再抛，重试纯烧延迟，
+                # 直接结束循环走回退（D4：超预算仍产出模板 PDF，而非终止交付）
+                raise DesignerError(f"token 预算耗尽，停止修正直接回退：{exc}")
             last_error = f"Agent 运行失败（{type(exc).__name__}: {exc}）"
             AUDIT.output(AGENT_DESIGNER, last_error)
             continue
         # 同步工具闭包产出的最新状态 → 修正轮任务文本依赖真实诊断（评审 #1）
         state["render"] = io.last_render
         state["findings"] = io.last_findings
+        state["tool_error"] = io.last_tool_error
         if io.last_render.get("ok"):
             last_error = ""
             break

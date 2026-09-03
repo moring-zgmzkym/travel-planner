@@ -56,7 +56,7 @@
 不让 Agent 自由发挥写 HTML，而是提供一套"印刷级设计系统"让它**组合**：
 - `tripmate/design/print.css`（v2 修订位置：Python 包资源目录，非 static/）：@page A4 边距、分页控制（`break-inside: avoid` 卡片不跨页）、中文字体栈（已核实本机字体）、3–4 套主题变量 class、组件样式。**由套壳代码内联注入 `<style>`**，不经 LLM、不耗 token、无相对路径问题
 - 组件片段库（`tripmate/design/fragments.py`，few-shot 素材）：封面英雄区、行程总览表、订单卡、垂直时间线、预算 SVG 环图/柱状图、实景图墙、酒店卡、美食卡（左图右文）、结尾页
-- **金样 HTML ×2**（人工打磨，成都 fixture 数据），**v2 修订：仅 1 份注入生成轮提示词**（修正轮不带），体积控制在 3–5K token——系统提示词每次模型调用都重发，2 份全注入的隐性成本是每轮 +5–10K token
+- **金样 HTML ×1**（人工打磨，成都 fixture 数据；原计划 2 份，为控制隐性 token 成本收敛为 1 份），注入生成轮提示词（修正轮不带），体积控制在 3–5K token（有单测体积回归锁）——系统提示词每次模型调用都重发，多份全注入的隐性成本是每轮 +5–10K token
 - **图片规则（v2 修订）**：黑板 `images[].path` / `hotels[].image_path` 存的是 **Windows 绝对路径**（如 `D:\CODE\...\outputs\images\xxx.jpg`，非 file:// 也非相对路径）。由确定性代码在快照阶段统一 `Path.as_uri()` 转为 `file:///` URI（正确处理中文/空格/反斜杠的百分号编码）后注入快照，Agent 照抄，禁止自行拼路径；消毒器校验 file URI 解析回的本机路径必须位于 `IMAGE_DIR`（outputs/images，含 crops 子目录）白名单内（见 D2）
 
 ### D2 输出契约与安全消毒（v2 改写为允许列表条文）
@@ -126,8 +126,8 @@ async def designer_chain(prof, run_id, agent_factory) -> DesignerResult
 | # | 任务 | 说明 | 验收标准 | 负责人 |
 |---|---|---|---|---|
 | 1.1 | print.css 框架 | @page、分页控制、字体栈、3–4 套主题变量、全部组件样式 | 金样引用后出片达标 | |
-| 1.2 | 组件片段库 | 9 类组件（封面/总览/订单卡/时间线/预算图表/图墙/酒店卡/美食卡/结尾页）各 1 个标准片段 | 每组件可独立渲染正确 | |
-| 1.3 | 金样 ×2 | 成都 fixture 数据手工打磨 2 份完整 HTML（不同主题），对标参考 PDF 视觉水准；**1 份裁剪至 3–5K token 注入提示词** | 渲染 PDF 经小组目检认可 | |
+| 1.2 | 组件片段库 | 10 段组件素材（封面/总览/订单卡/逐日行程卡/时间线/预算图表/图墙/酒店卡/美食卡/结尾页） | 每组件可独立渲染正确 | |
+| 1.3 | 金样 ×1 | 成都 fixture 数据手工打磨 1 份完整 HTML，对标参考 PDF 视觉水准；**裁剪至 3–5K token 注入提示词（有单测体积回归锁）** | 渲染 PDF 经小组目检认可 | |
 | 1.4 | 消毒器 + 渲染工具 | `tripmate/tools/htmlpdf.py`：sanitize_html()（允许列表，D2 条文）+ wrap_html()（套壳注入 print.css/charset/页脚）+ render_html_pdf()（Playwright 主 / Edge 备 / 异常信号；**独立 `with sync_playwright()` 上下文 + try/finally 关闭 + 进程级 Semaphore(1) + goto/pdf 各自超时**；调用侧 `asyncio.to_thread`）+ inspect_pdf()（fitz 诊断，PyMuPDF 缺失时优雅降级跳过文本检查） | 单测：script/iframe/on*/meta refresh/base/srcset/data: 类型/CSS @import 与 url()/file 白名单/UNC 全覆盖；正常 HTML 出合法 PDF；中文与空格路径 as_uri 正确 | |
 
 ### 阶段 2：Designer Agent（1.5–2 天）

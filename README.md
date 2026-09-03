@@ -66,7 +66,7 @@ python run.py          # 或 Windows 双击 run.bat
 | `tripmate/tools/htmlpdf.py` | HTML 允许列表消毒器 + file:// 白名单 + Playwright/Edge 双通道渲染 + fitz 渲染诊断 |
 | `tripmate/gateway/app.py` | FastAPI + WebSocket 网关 |
 | `static/` | 前端三件套（原生 JS） |
-| `tests/` | 64 项单测（黑板/影响分析/打分/校验/selector/路书PDF/多模板PDF冒烟与边界/主备切换/二次规划/会话） |
+| `tests/` | 单测（黑板/影响分析/打分/校验/selector/路书PDF/多模板PDF冒烟与边界/Designer 消毒渲染诊断与回退链/主备切换/二次规划/会话） |
 | `scripts/` | 端到端冒烟脚本（e2e_step1/2/3） |
 | `outputs/` | PDF 与配图产物 |
 | `logs/tripmate.log` | ReAct 审计日志（Thought→Action→Observation→产出，验收 #16 证据） |

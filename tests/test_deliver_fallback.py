@@ -145,6 +145,37 @@ def test_designer_success_path(tmp_path, monkeypatch):
     assert bb.profile.final.render_source == "designer"
 
 
+def test_token_budget_exceeded_still_delivers_template_pdf(tmp_path, monkeypatch):
+    """D4：超预算走回退而非终止交付——用户仍拿到模板 PDF。"""
+    from tripmate import designer as dmod
+
+    bb = Blackboard()
+    _fill(bb, "designer")
+    ctx = _ctx(bb)
+
+    class _TokenBudgetExceeded(RuntimeError):
+        pass
+
+    async def _over_budget(**kwargs):
+        raise _TokenBudgetExceeded("token 消耗已超上限")
+
+    monkeypatch.setattr(dmod, "designer_chain", _over_budget)
+    result = json.loads(_run(_deliver_final(ctx)))
+    assert result["status"] == "ok"
+    assert result["render_source"].startswith("template:")
+    assert Path(result["pdf_path"]).exists()
+
+
+def test_legal_template_fallback_keeps_original_template(tmp_path):
+    """合法模板名回退保留原模板（仅 designer/非法值落 classic）。"""
+    bb = Blackboard()
+    _fill(bb, "warm")
+    ctx = _ctx(bb)
+    result = json.loads(_run(_deliver_final(ctx)))
+    assert result["status"] == "ok"
+    assert result["render_source"] == "template:warm"
+
+
 def test_illegal_template_value_never_reaches_registry(tmp_path):
     """template 为损坏值（非 designer 也非注册表名）→ 过滤为 None，回退 classic 不炸。"""
     bb = Blackboard()

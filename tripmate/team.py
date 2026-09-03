@@ -489,14 +489,16 @@ async def _deliver_final(ctx: TeamContext, force_template: bool = False) -> str:
         if t.selected:
             amt = t.price if "往返" in t.train_no else t.price * 2 * party
             orders.append({"type": "车票", "name": t.train_no, "amount": round(amt, 1),
-                           "link": t.link, "reason": t.reason, "reference_only": t.reference_only})
+                           "link": t.link, "reason": t.reason, "reference_only": t.reference_only,
+                           "selected": True})
             total += amt
     nights = max((prof.basic_info.days or 1) - 1, 0)
     for h in prof.hotels:
         if h.selected:
             amt = h.price_per_night * nights
             orders.append({"type": "酒店", "name": h.name, "amount": round(amt, 1),
-                           "link": h.link, "reason": h.reason, "reference_only": h.reference_only})
+                           "link": h.link, "reason": h.reason, "reference_only": h.reference_only,
+                           "selected": True})
             total += amt
     final = FinalDelivery(
         pdf_path=str(pdf_path),
