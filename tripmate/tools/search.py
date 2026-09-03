@@ -141,6 +141,61 @@ async def search_images(spots: list[str], per_spot: int = 2, city: str = "") -> 
     return {"mode": "real", "items": items}
 
 
+async def search_city_covers(city: str, count: int = 3) -> list[str]:
+    """城市宣传图（PDF 封面背景专用，2026-09-03）：独立查询词与内页素材图区分，
+    PIL 门槛（宽 ≥1200 且横版）逐张验证，`citycover_` 前缀独立落盘；失败返回空列表。"""
+    import io
+
+    from PIL import Image as PILImage
+
+    from ..config import IMAGE_DIR
+    if not city or not SearchConfig.TAVILY_API_KEY:
+        return []
+    queries = [f"{city} 地标 城市风光 宣传照", f"{city} 城市天际线 摄影"]
+    urls: list[str] = []
+    seen: set[str] = set()
+    async with httpx.AsyncClient(timeout=_IMG_TIMEOUT_S, headers=_IMG_HEADERS,
+                                 follow_redirects=True) as client:
+        for q in queries:
+            try:
+                r = await client.post(TAVILY_URL, json={
+                    "api_key": SearchConfig.TAVILY_API_KEY,
+                    "query": q, "search_depth": "basic",
+                    "max_results": 6, "include_images": True,
+                })
+                r.raise_for_status()
+                imgs = r.json().get("images") or []
+            except Exception as exc:  # noqa: BLE001 — 单查询失败继续另一查询
+                logger.warning("封面图检索「%s」失败（%s: %s）", q, type(exc).__name__, exc)
+                continue
+            for u in (x.get("url") if isinstance(x, dict) else x for x in imgs):
+                if u and u not in seen and not any(h in urlsplit(u).netloc for h in _WATERMARK_HOSTS):
+                    seen.add(u)
+                    urls.append(u)
+        out: list[str] = []
+        for url in urls[:count + 6]:
+            try:
+                r = await client.get(url)
+                r.raise_for_status()
+                if len(r.content) < 20000:  # 封面全幅铺底，小图拉伸发糊
+                    continue
+                with PILImage.open(io.BytesIO(r.content)) as im:
+                    im = im.convert("RGB")
+                    w, h = im.size
+                    if w < 1200 or w <= h:  # 够宽且横版（竖图裁竖版封面会太窄）
+                        continue
+                    path = IMAGE_DIR / ("citycover_" + hashlib.md5(
+                        f"{city}|{url}".encode()).hexdigest()[:16] + ".jpg")
+                    im.save(path, quality=90)
+                out.append(str(path))
+                if len(out) >= count:
+                    break
+            except Exception:  # noqa: BLE001 — 单候选失败换下一个
+                continue
+    logger.info("封面宣传图检索「%s」：%d 张合格候选", city, len(out))
+    return out
+
+
 async def _spot_images(client: httpx.AsyncClient, spot: str, per_spot: int, city: str = "") -> list[dict]:
     """单景点抓取链：Tavily 实景图 → Wikimedia 备用 → PIL 占位。"""
     out = await _tavily_images(client, spot, per_spot, city)

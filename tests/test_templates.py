@@ -42,6 +42,6 @@ def test_template_edge_profile(name):
 def test_registry_metadata_and_errors():
     metas = list_templates()
     assert metas and all(m["name"] and m["display_name"] for m in metas)
-    assert get_template(None).name == "classic"
+    assert get_template(None).name == "cartoon"
     with pytest.raises(ValueError):
         get_template("no_such_template")

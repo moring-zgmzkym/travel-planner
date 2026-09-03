@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .base import BaseTripTemplate
 from .card import CardTemplate
+from .cartoon import CartoonTemplate
 from .classic import ClassicTemplate
 from .guide import GuideTemplate
 from .journal import JournalTemplate
@@ -11,6 +12,7 @@ from .minimal import MinimalTemplate
 from .warm import WarmTemplate
 
 _TEMPLATE_CLASSES: list[type[BaseTripTemplate]] = [
+    CartoonTemplate,
     ClassicTemplate,
     GuideTemplate,
     MinimalTemplate,
@@ -20,7 +22,7 @@ _TEMPLATE_CLASSES: list[type[BaseTripTemplate]] = [
 ]
 
 REGISTRY: dict[str, BaseTripTemplate] = {cls.name: cls() for cls in _TEMPLATE_CLASSES}
-DEFAULT_TEMPLATE = "classic"
+DEFAULT_TEMPLATE = "cartoon"
 
 
 def get_template(name: str | None = None) -> BaseTripTemplate:

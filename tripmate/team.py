@@ -33,7 +33,7 @@ from .pdf_gen import build_pdf
 from .planning import PACE_SPOTS, analyze_impact, compute_budget, validate_draft
 from .status import AUDIT, StatusBus
 from .tools.hotels import query_hotels, score_and_select as score_hotels
-from .tools.search import search_guides, search_images
+from .tools.search import search_city_covers, search_guides, search_images
 from .tools.tickets import query_tickets, score_and_select as score_tickets
 from .tools.weather import near_term_dates, query_weather
 
@@ -790,6 +790,18 @@ class TeamRunner:
                                   f"攻略笔记提炼：景点 {len(notes['spots'])} / 美食 {len(notes['foods'])}")
             except Exception:  # noqa: BLE001 — 提炼失败静默，PDF 走回退版式
                 AUDIT.observation("TeamRunner", "攻略笔记提炼失败（跳过，PDF 走回退）")
+        # 封面城市宣传图（PDF 封面背景专用）：独立查询与素材图隔离；失败静默走渐变封面。
+        # 幂等同 digest：本轮已尝试（含失败）不再重试。
+        if (basic.destination and not prof.cover_images
+                and not getattr(self, "_cover_done", False)):
+            self._cover_done = True
+            try:
+                covers = await search_city_covers(basic.destination)
+                if covers:
+                    await self.bb.write("cover_images", covers, "researcher", "封面城市宣传图检索")
+                AUDIT.observation("TeamRunner", f"封面宣传图检索：{len(covers)} 张合格候选")
+            except Exception:  # noqa: BLE001 — 封面图失败静默，走渐变封面
+                AUDIT.observation("TeamRunner", "封面宣传图检索失败（跳过，走渐变封面）")
         if phase in ("collect", "revise"):
             if not prof.plan_input:
                 resolved = {

@@ -188,6 +188,17 @@ class BaseTripTemplate:
     COVER_BOT_RGB = (32, 54, 104)
     COVER_GOLD_RGB = (212, 175, 105)
     COVER_W, COVER_H = 1100, 1528  # ≈178×247mm（A4 内容区整页）
+    # 封面宣传图模式（cover_images 有候选时）：dark=暗色渐变遮罩（classic）/ panel=白色圆角面板（卡通风）
+    COVER_PHOTO_MODE = "dark"
+    COVER_TITLE_RGB = (255, 255, 255)
+    COVER_SUB_RGB = (222, 230, 242)
+    COVER_MUTED_RGB = (150, 168, 196)
+    COVER_STAT_RGB = None              # None=沿用 COVER_GOLD_RGB
+    COVER_STATLAB_RGB = (180, 194, 216)
+    COVER_CHIP_LINE_RGB = (150, 168, 196)
+    COVER_CHIP_TEXT_RGB = (200, 212, 230)
+    COVER_PANEL_RGB = (255, 255, 255)
+    COVER_PANEL_ALPHA = 236
 
     # ---- 渲染入口 ----
 
@@ -416,38 +427,82 @@ class BaseTripTemplate:
         return base
 
     def make_cover(self, profile: TravelProfile) -> str:
-        """封面：主题底 + 底部实拍条（渐变融入）+ 大字标题 + 风格 tag + 底部信息行。
+        """封面：城市宣传图全幅铺底（cover_images 有候选时）+ 主题遮罩/面板保文字对比度，
+        或回退主题渐变底 + 底部实拍条（现状行为）+ 大字标题 + 风格 tag + 底部信息行。
 
-        全程回退安全：无实拍图/绘制失败均回退纯色封面。"""
+        全程回退安全：无宣传图/无实拍图/绘制失败均回退纯色封面。"""
         basic = profile.basic_info
         dest = basic.destination or "旅行"
         days = basic.days or "-"
+        photo_path = next((p for p in (profile.cover_images or []) if p), "")
         out = CROP_DIR / ("cover_" + hashlib.md5(
-            f"{self.name}|{dest}|{days}|{self.COVER_TOP_RGB}|v2".encode()).hexdigest()[:12] + ".jpg")
+            f"{self.name}|{dest}|{days}|{self.COVER_TOP_RGB}|{photo_path}|v3".encode()).hexdigest()[:12] + ".jpg")
         gold = self.COVER_GOLD_RGB
+        title_rgb = self.COVER_TITLE_RGB
+        sub_rgb = self.COVER_SUB_RGB
+        muted_rgb = self.COVER_MUTED_RGB
+        stat_rgb = self.COVER_STAT_RGB or gold
+        statlab_rgb = self.COVER_STATLAB_RGB
+        chip_line_rgb = self.COVER_CHIP_LINE_RGB
+        chip_text_rgb = self.COVER_CHIP_TEXT_RGB
         try:
             CROP_DIR.mkdir(parents=True, exist_ok=True)
             base = self.cover_base().convert("RGBA")
             strip_h, blend = 420, 160
-            for item in profile.images[:8]:
-                if any(k in (item.source or "") for k in ("示意", "非实景", "占位")) or not item.path:
-                    continue
+            photo_bg = False
+            for p in (profile.cover_images or [])[:3]:
                 try:
-                    with PILImage.open(item.path) as im:
-                        photo = crop_ratio(im.convert("RGB"), self.COVER_W / strip_h).resize((self.COVER_W, strip_h))
-                    mask = PILImage.new("L", (self.COVER_W, strip_h), 255)
-                    mpx = mask.load()
-                    for y in range(blend):
-                        v = int(255 * y / blend)
-                        for x in range(self.COVER_W):
-                            mpx[x, y] = v
-                    base.paste(photo, (0, self.COVER_H - strip_h), mask)
+                    with PILImage.open(p) as im:
+                        photo = crop_ratio(im.convert("RGB"), self.COVER_W / self.COVER_H).resize(
+                            (self.COVER_W, self.COVER_H))
+                    base.paste(photo, (0, 0))
+                    photo_bg = True
                     break
-                except Exception:  # noqa: BLE001 — 换下一张
+                except Exception:  # noqa: BLE001 — 首图损坏试下一张/回退渐变
                     continue
+            if photo_bg and self.COVER_PHOTO_MODE == "dark":
+                # 竖向暗色渐变遮罩：顶部 200 → 中部 90 → 底部 195（标题区与统计栏都加深）
+                grad = PILImage.new("L", (1, self.COVER_H))
+                gp = grad.load()
+                mid = int(self.COVER_H * 0.42)
+                for y in range(self.COVER_H):
+                    v = (int(200 - (200 - 90) * y / mid) if y <= mid
+                         else int(90 + (195 - 90) * (y - mid) / (self.COVER_H - 1 - mid)))
+                    gp[0, y] = v
+                overlay = PILImage.new("RGBA", (self.COVER_W, self.COVER_H), (13, 25, 48, 0))
+                overlay.putalpha(grad.resize((self.COVER_W, self.COVER_H)))
+                base = PILImage.alpha_composite(base, overlay)
+            elif photo_bg and self.COVER_PHOTO_MODE == "panel":
+                veil = PILImage.new("RGBA", (self.COVER_W, self.COVER_H), (255, 255, 255, 70))
+                base = PILImage.alpha_composite(base, veil)
+            if not photo_bg:  # 现状回退：底部实拍条（渐变融入）
+                for item in profile.images[:8]:
+                    if any(k in (item.source or "") for k in ("示意", "非实景", "占位")) or not item.path:
+                        continue
+                    try:
+                        with PILImage.open(item.path) as im:
+                            photo = crop_ratio(im.convert("RGB"), self.COVER_W / strip_h).resize((self.COVER_W, strip_h))
+                        mask = PILImage.new("L", (self.COVER_W, strip_h), 255)
+                        mpx = mask.load()
+                        for y in range(blend):
+                            v = int(255 * y / blend)
+                            for x in range(self.COVER_W):
+                                mpx[x, y] = v
+                        base.paste(photo, (0, self.COVER_H - strip_h), mask)
+                        break
+                    except Exception:  # noqa: BLE001 — 换下一张
+                        continue
             d = ImageDraw.Draw(base)
             d.rectangle((0, self.COVER_H - strip_h - 3, self.COVER_W, self.COVER_H - strip_h), fill=gold)
             d.rectangle((0, 0, 14, self.COVER_H), fill=gold)
+            if photo_bg and self.COVER_PHOTO_MODE == "panel":
+                # 卡通风：白色圆角半透明面板承托全部文字（照片上保证对比度）
+                panel = PILImage.new("RGBA", (self.COVER_W, self.COVER_H), (0, 0, 0, 0))
+                ImageDraw.Draw(panel).rounded_rectangle(
+                    (64, 250, self.COVER_W - 64, self.COVER_H - 320), radius=48,
+                    fill=(*self.COVER_PANEL_RGB, self.COVER_PANEL_ALPHA))
+                base = PILImage.alpha_composite(base, panel)
+                d = ImageDraw.Draw(base)
             f_tag = pil_font(26)
             f_sub = pil_font(34)
             f_chip = pil_font(24)
@@ -460,11 +515,11 @@ class BaseTripTemplate:
                                 outline=gold, width=2)
             draw_center(d, self.COVER_W, y0 + 12, tagline, f_tag, gold)
             f_title = fit_font(d, dest, 88, self.COVER_W * 0.86, min_size=48, step=8)
-            draw_center(d, self.COVER_W, 470, f"{dest}", f_title, (255, 255, 255))
+            draw_center(d, self.COVER_W, 470, f"{dest}", f_title, title_rgb)
             sub = f"{days} 天旅行路书".replace(" -1 天", "")
-            draw_center(d, self.COVER_W, 590, sub, f_sub, (222, 230, 242))
+            draw_center(d, self.COVER_W, 590, sub, f_sub, sub_rgb)
             sub2 = f"{basic.origin or ''} — {dest} · TRIPMATE ITINERARY".strip(" —")
-            draw_center(d, self.COVER_W, 648, sub2, pil_font(22), (150, 168, 196))
+            draw_center(d, self.COVER_W, 648, sub2, pil_font(22), muted_rgb)
             tags = (basic.style or [])[:4] or ["休闲"]
             chip_gap, pad = 18, 46
             widths = [d.textlength(t, font=f_chip) + pad * 2 for t in tags]
@@ -472,9 +527,9 @@ class BaseTripTemplate:
             cx, cy = (self.COVER_W - total) / 2, 760
             for t, w in zip(tags, widths):
                 d.rounded_rectangle((cx, cy, cx + w, cy + 52), radius=26,
-                                    outline=(150, 168, 196), width=2)
+                                    outline=chip_line_rgb, width=2)
                 tx = cx + (w - d.textlength(t, font=f_chip)) / 2
-                d.text((tx, cy + 10), t, font=f_chip, fill=(200, 212, 230))
+                d.text((tx, cy + 10), t, font=f_chip, fill=chip_text_rgb)
                 cx += w + chip_gap
             info_y = self.COVER_H - strip_h - 96
             party = basic.party_size or detail.party_size if (detail := profile.detail_info) else basic.party_size
@@ -490,9 +545,9 @@ class BaseTripTemplate:
             for i, (num, lab) in enumerate(stats):
                 cx = col_w * i + col_w / 2
                 d.text((cx - d.textlength(num, font=f_num) / 2, info_y + (46 - f_num.size)), num,
-                       font=f_num, fill=gold)
+                       font=f_num, fill=stat_rgb)
                 d.text((cx - d.textlength(lab, font=f_lab) / 2, info_y + 66), lab, font=f_lab,
-                       fill=(180, 194, 216))
+                       fill=statlab_rgb)
             base = base.convert("RGB")
             base.save(out, quality=90)
             return str(out)

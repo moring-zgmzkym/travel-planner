@@ -166,40 +166,36 @@ class ClassicTemplate(BaseTripTemplate):
                     [Paragraph("晚上", slot_st()),
                      Paragraph(day.evening or "—", st("cell", 11, leading=17))],
                 ]
-                strip_path = ""
+                # 一天=一张表：照片头条作为跨列首行并入（2026-09-03 修复：此前照片与行程表
+                # 是两个独立 Flowable，分页/拼接会错位），顺序天然正确、永不分离
                 photo = day_photo(day, profile)
-                if photo:
-                    strip_path = self.day_strip(photo, label, h=250)
+                strip_path = self.day_strip(photo, label, h=250) if photo else ""
+                cmds = [
+                    ("BACKGROUND", (0, 1), (0, -1), self.LIGHT),
+                    ("LINEBELOW", (0, 1), (-1, -2), 0.4, self.HAIRLINE),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 1), (-1, -1), 10), ("BOTTOMPADDING", (0, 1), (-1, -1), 10),
+                    ("LEFTPADDING", (0, 1), (-1, -1), 10),
+                ]
                 if strip_path:
-                    # 照片头条（178×40mm）+ 白底正文卡；头条与正文间不加分隔，视觉上是一张卡
-                    story.append(Image(strip_path, width=CONTENT_W, height=CONTENT_W * 250 / 1100))
-                    t = Table(body_rows, colWidths=[20 * mm, CONTENT_W - 20 * mm])
-                    t.setStyle(TableStyle([
-                        ("BACKGROUND", (0, 0), (0, -1), self.LIGHT),
-                        ("LINEBELOW", (0, 0), (-1, -2), 0.4, self.HAIRLINE),
-                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                    ]))
+                    img = Image(strip_path, width=CONTENT_W, height=CONTENT_W * 250 / 1100)
+                    rows = [[img, ""]] + body_rows
+                    cmds += [("SPAN", (0, 0), (1, 0)),
+                             ("LEFTPADDING", (0, 0), (-1, 0), 0), ("RIGHTPADDING", (0, 0), (-1, 0), 0),
+                             ("TOPPADDING", (0, 0), (-1, 0), 0), ("BOTTOMPADDING", (0, 0), (-1, 0), 0)]
                 else:
-                    day_rows = [[Paragraph(label, st("day", 13, bold=True, color=colors.white)), ""]] + \
-                        body_rows
-                    t = Table(day_rows, colWidths=[20 * mm, CONTENT_W - 20 * mm])
-                    t.setStyle(TableStyle([
-                        ("SPAN", (0, 0), (1, 0)),
-                        ("BACKGROUND", (0, 0), (1, 0), self.PRIMARY),
-                        ("BACKGROUND", (0, 1), (0, -1), self.LIGHT),
-                        ("LINEBELOW", (0, 1), (-1, -2), 0.4, self.HAIRLINE),
-                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                    ]))
+                    rows = [[Paragraph(label, st("day", 13, bold=True, color=colors.white)), ""]] + body_rows
+                    cmds += [("SPAN", (0, 0), (1, 0)),
+                             ("BACKGROUND", (0, 0), (1, 0), self.PRIMARY)]
+                t = Table(rows, colWidths=[20 * mm, CONTENT_W - 20 * mm])
+                t.setStyle(TableStyle(cmds))
                 day_flow.append(t)
-                day_flow.append(Spacer(1, 12))
         if day_flow:
-            # 标题与首块绑定，避免章节头孤立在页底
+            # 每张日表 KeepTogether 防跨页拆分（照片/蓝头与行程永远同页）；章节头绑首表
             story.append(KeepTogether([self.section("肆", "逐日行程"), Spacer(1, 3), day_flow[0]]))
-            story.extend(day_flow[1:])
+            for day_t in day_flow[1:]:
+                story.append(Spacer(1, 12))
+                story.append(KeepTogether([day_t]))
         story.append(Spacer(1, 2))
 
         # ---- 伍 预算核算 ----
@@ -384,6 +380,6 @@ class ClassicTemplate(BaseTripTemplate):
                                    st("src3", 8, color=self.WARN, spaceBefore=3)))
         story.append(Spacer(1, 10))
         story.append(Paragraph(f"本计划由 TripMate 多 Agent 系统生成 · {datetime.now():%Y-%m-%d %H:%M} · "
-                               f"车票/酒店请在官方渠道完成支付（系统不接触支付，§4.4）",
+                               f"车票/酒店请在官方渠道完成支付（系统不接触支付）",
                                st("footer", 8, color=self.GRAY)))
         return story

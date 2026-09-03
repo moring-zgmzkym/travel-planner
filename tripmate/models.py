@@ -26,7 +26,7 @@ class BasicInfo(BaseModel):
     budget_max: float | None = None
     party_size: int = 1
     defaults_applied: list[str] = Field(default_factory=list)  # 被默认值补齐的字段名
-    template: str | None = None  # PDF 模板名（空=默认经典模板；注册表见 pdf_templates）
+    template: str | None = None  # PDF 模板名（空=默认卡通模板；注册表见 pdf_templates）
 
     def missing_required(self) -> list[str]:
         """不可默认字段缺失清单（§2.1：出发地/目的地/天数）。"""
@@ -85,6 +85,8 @@ class TicketCandidate(BaseModel):
     reason: str = ""
     source: str = "12306-MCP"
     reference_only: bool = False
+    from_telecode: str = ""    # 出发站电报码（12306 深链预填用；模拟/降级路径为空）
+    to_telecode: str = ""      # 到达站电报码
 
 
 class HotelCandidate(BaseModel):
@@ -190,6 +192,7 @@ class TravelProfile(BaseModel):
     images: list[ImageItem] = Field(default_factory=list)
     spot_notes: list[SpotNote] = Field(default_factory=list)
     food_notes: list[FoodNote] = Field(default_factory=list)
+    cover_images: list[str] = Field(default_factory=list)  # 封面城市宣传图候选（citycover_ 前缀，与素材图隔离）
     plan_input: PlanInput | None = None
     draft: Draft | None = None
     draft_feedback: DraftFeedback | None = None

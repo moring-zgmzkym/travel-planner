@@ -108,10 +108,19 @@ def _normalize_12306(raw: object, origin: str, destination: str, date: str) -> l
         dur = pick("duration", "lishi", "历时", "spend")
         if not train_no or price_f <= 0:
             continue
+        # 12306 深链：站点电报码（MCP 返回自带）才能让余票页预填并自动查询；缺失回退站名格式
+        from_code = str(r.get("from_station_telecode") or "").strip()
+        to_code = str(r.get("to_station_telecode") or "").strip()
+        if from_code and to_code:
+            link = (f"https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc"
+                    f"&fs={origin},{from_code}&ts={destination},{to_code}&date={date}&flag=N,N")
+        else:
+            link = f"https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc&fs={origin}&ts={destination}&date={date}"
         out.append({
             "train_no": train_no, "depart_time": dep or "--:--", "arrive_time": arr or "--:--",
             "duration_min": _parse_duration(dur, dep, arr), "price": price_f,
-            "link": f"https://kyfw.12306.cn/otn/leftTicket/init?linktypeid=dc&fs={origin}&ts={destination}&date={date}",
+            "link": link,
+            "from_telecode": from_code, "to_telecode": to_code,
             "source": "12306-MCP（实时数据）", "reference_only": False,
         })
     return out
