@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from PIL import Image as PILImage
 from PIL import ImageDraw, ImageFont
@@ -78,6 +79,41 @@ def pil_font(size: int) -> ImageFont.FreeTypeFont:
         except Exception:  # noqa: BLE001
             continue
     return ImageFont.load_default()
+
+
+_EMOJI_FONT = r"C:\Windows\Fonts\seguiemj.ttf"
+
+
+def emoji_png(ch: str, size: int = 96) -> str:
+    """彩色 emoji 栅格化为透明 PNG（reportlab 不能直接画 emoji，先经 PIL 出图）。
+
+    Windows 自带 Segoe UI Emoji；失败（字体缺失/非 emoji 字符）返回空串，
+    调用方必须回退纯文字徽章，不得让 PDF 构建失败。"""
+    if not ch:
+        return ""
+    out = CROP_DIR / "emoji" / (hashlib.md5(f"{ch}|{size}".encode()).hexdigest()[:12] + ".png")
+    try:
+        if not out.exists():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            f = ImageFont.truetype(_EMOJI_FONT, size)
+            canvas = PILImage.new("RGBA", (size + 12, size + 12), (0, 0, 0, 0))
+            ImageDraw.Draw(canvas).text((6, 6), ch, font=f, embedded_color=True)
+            bbox = canvas.getbbox()
+            if not bbox:
+                return ""
+            canvas.crop(bbox).save(out)
+        return str(out)
+    except Exception:  # noqa: BLE001 — emoji 不可用回退文字徽章
+        return ""
+
+
+def fit_font(draw: ImageDraw.ImageDraw, text: str, size: int, max_w: float,
+             min_size: int = 18, step: int = 4) -> ImageFont.FreeTypeFont:
+    """PIL 侧宽度自适应缩字号：从 size 起按 step 递减，直到文本宽不超 max_w 或到 min_size。"""
+    f = pil_font(size)
+    while f.size > min_size and draw.textlength(text, font=f) > max_w:
+        f = pil_font(f.size - step)
+    return f
 
 
 def crop_ratio(im: PILImage.Image, ratio: float, anchor: float = 0.45) -> PILImage.Image:
@@ -263,13 +299,12 @@ class BaseTripTemplate:
         except Exception:  # noqa: BLE001 — 裁剪失败退回原图（现状行为）
             return path
 
-    def day_strip(self, path: str, title: str) -> str:
-        """日程卡照片头条：实拍图裁 178×30mm + 左深右透渐变压暗 + 上下缘羽化 + 白色粗体标题。
-        失败返回空串（调用方回退纯色日头条）。"""
-        w, h = 1100, 185
-        # 缓存键含模板名与强调色：不同模板同图同标题不互相覆盖（v4，2026-09-01 审查修复）
+    def day_strip(self, path: str, title: str, h: int = 185) -> str:
+        """日程卡照片头条：实拍图裁 1100×h 渐变压暗 + 白色粗体标题；失败返回空串。"""
+        w = 1100
+        # 缓存键含模板名/强调色/标题/高度：v6（2026-09-03 标题限宽 + 高度参数化）
         out = CROP_DIR / ("day_" + hashlib.md5(
-            f"{self.name}|{self.ACCENT_RGB}|{path}|{title}|v4".encode()).hexdigest()[:12] + ".jpg")
+            f"{self.name}|{self.ACCENT_RGB}|{path}|{title}|h{h}|v6".encode()).hexdigest()[:12] + ".jpg")
         try:
             CROP_DIR.mkdir(parents=True, exist_ok=True)
             with PILImage.open(path) as im:
@@ -297,7 +332,12 @@ class BaseTripTemplate:
             base = base.convert("RGB")
             d = ImageDraw.Draw(base)
             d.rectangle((0, 0, 9, h), fill=self.ACCENT_RGB)
-            f = pil_font(40)
+            # 标题限宽：先缩字号（最小 30px），仍超则截断加省略号——防止长标题横穿整幅
+            f = fit_font(d, title, 40, w - 80, min_size=30, step=2)
+            if d.textlength(title, font=f) > w - 80:
+                while title and d.textlength(title + "…", font=f) > w - 80:
+                    title = title[:-1]
+                title = title + "…"
             ty = (h - 46) // 2
             d.text((32, ty + 2), title, font=f, fill=(10, 25, 45))   # 投影
             d.text((30, ty), title, font=f, fill=(255, 255, 255))
@@ -306,15 +346,19 @@ class BaseTripTemplate:
         except Exception:  # noqa: BLE001 — 失败回退纯色日头条
             return ""
 
-    def image_cell(self, spot: str, path: str, source: str) -> Table:
+    def image_cell(self, spot: str, path: str, source: str, caption: str = "") -> Table:
         cells = [[Paragraph(f"{spot}", self.style("imgspot", 9.5, bold=True))]]
         try:
             p = self.crop_43(path)
             cells.append([Image(p, width=79 * mm, height=79 * mm * 3 / 4)])
         except Exception:  # noqa: BLE001 — 图片缺失降级为文字卡片（§5.2）
             cells.append([Paragraph(f"【{spot}】图片暂缺", self.style("noimg", 10, color=self.GRAY))])
-        src = source if len(source) <= 96 else source[:93] + "..."
-        cells.append([Paragraph(f"来源：{src}", self.style("imgsrc", 7.5, color=self.GRAY, leading=10))])
+        if caption:
+            # 图注优先走简介/游玩建议（classic 2026-09-03 需求：不再展示来源）
+            cells.append([Paragraph(escape(caption), self.style("imgnote", 8.5, leading=12))])
+        elif source:
+            src = source if len(source) <= 96 else source[:93] + "..."
+            cells.append([Paragraph(f"来源：{src}", self.style("imgsrc", 7.5, color=self.GRAY, leading=10))])
         t = Table(cells, colWidths=[85 * mm])
         t.setStyle(TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.5, self.HAIRLINE),
@@ -379,7 +423,7 @@ class BaseTripTemplate:
         dest = basic.destination or "旅行"
         days = basic.days or "-"
         out = CROP_DIR / ("cover_" + hashlib.md5(
-            f"{self.name}|{dest}|{days}|{self.COVER_TOP_RGB}|v1".encode()).hexdigest()[:12] + ".jpg")
+            f"{self.name}|{dest}|{days}|{self.COVER_TOP_RGB}|v2".encode()).hexdigest()[:12] + ".jpg")
         gold = self.COVER_GOLD_RGB
         try:
             CROP_DIR.mkdir(parents=True, exist_ok=True)
@@ -405,16 +449,17 @@ class BaseTripTemplate:
             d.rectangle((0, self.COVER_H - strip_h - 3, self.COVER_W, self.COVER_H - strip_h), fill=gold)
             d.rectangle((0, 0, 14, self.COVER_H), fill=gold)
             f_tag = pil_font(26)
-            f_title = pil_font(88)
             f_sub = pil_font(34)
             f_chip = pil_font(24)
             tagline = " · ".join(basic.style or []) or "轻松出行"
             tagline = f"{basic.origin or '出发地'} 出发 · {tagline}"
+            f_tag = fit_font(d, tagline, 26, self.COVER_W * 0.8, min_size=18, step=2)
             tw = d.textlength(tagline, font=f_tag)
             x0, y0 = (self.COVER_W - tw) / 2 - 34, 300
             d.rounded_rectangle((x0, y0, x0 + tw + 68, y0 + 58), radius=29,
                                 outline=gold, width=2)
             draw_center(d, self.COVER_W, y0 + 12, tagline, f_tag, gold)
+            f_title = fit_font(d, dest, 88, self.COVER_W * 0.86, min_size=48, step=8)
             draw_center(d, self.COVER_W, 470, f"{dest}", f_title, (255, 255, 255))
             sub = f"{days} 天旅行路书".replace(" -1 天", "")
             draw_center(d, self.COVER_W, 590, sub, f_sub, (222, 230, 242))
@@ -432,17 +477,20 @@ class BaseTripTemplate:
                 d.text((tx, cy + 10), t, font=f_chip, fill=(200, 212, 230))
                 cx += w + chip_gap
             info_y = self.COVER_H - strip_h - 96
-            f_num = pil_font(46)
-            f_lab = pil_font(20)
             party = basic.party_size or detail.party_size if (detail := profile.detail_info) else basic.party_size
             stats = [(f"{days}天", f"{basic.travel_mode or '高铁'} 往返"),
                      (basic.travel_dates[0] if basic.travel_dates else (basic.date_text or "日期待定"), "出行时间"),
                      (f"{party or '-'} 人", "同行人数"),
                      (f"¥{int(basic.budget)}" if basic.budget else "-", "预算参考")]
             col_w = self.COVER_W / len(stats)
+            # 整行取统一字号（能容纳最长一项的最大号），杜绝长日期串压邻列重叠
+            f_num = fit_font(d, max((num for num, _ in stats), key=lambda s: d.textlength(s, font=pil_font(46))),
+                             46, col_w * 0.88, min_size=24, step=4)
+            f_lab = pil_font(20)
             for i, (num, lab) in enumerate(stats):
                 cx = col_w * i + col_w / 2
-                d.text((cx - d.textlength(num, font=f_num) / 2, info_y), num, font=f_num, fill=gold)
+                d.text((cx - d.textlength(num, font=f_num) / 2, info_y + (46 - f_num.size)), num,
+                       font=f_num, fill=gold)
                 d.text((cx - d.textlength(lab, font=f_lab) / 2, info_y + 66), lab, font=f_lab,
                        fill=(180, 194, 216))
             base = base.convert("RGB")

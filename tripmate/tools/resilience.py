@@ -23,6 +23,15 @@ async def with_retry(
     for attempt in range(retries + 1):
         try:
             return await asyncio.wait_for(fn(), timeout=timeout_s)
+        except asyncio.CancelledError as e:
+            # anyio 作用域在超时取消后的清理阶段会抛出 CancelledError（BaseException，
+            # except Exception 接不住，会炸穿调用方）。Task.cancelling()>0 才是外部
+            # 真实取消（须透传）；否则视为清理期伪取消，按失败重试。
+            if asyncio.current_task() is not None and asyncio.current_task().cancelling() > 0:
+                raise
+            last_err = e
+            if attempt < retries:
+                await asyncio.sleep(delay_s)
         except Exception as e:  # noqa: BLE001 — 统一容错边界
             last_err = e
             if attempt < retries:

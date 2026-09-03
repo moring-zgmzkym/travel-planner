@@ -6,3 +6,4 @@ outputs/images/
 outputs/*.pdf
 .pytest_cache/
 learning/
+outputs/

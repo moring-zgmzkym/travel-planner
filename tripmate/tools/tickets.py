@@ -40,9 +40,9 @@ async def query_tickets(origin: str, destination: str, dates: list[str], mode: s
 
         async def _query() -> list:
             return await session.call(
-                ("ticket",), 
+                ("ticket",),
                 {"from": origin, "to": destination, "date": date, "fromStation": origin,
-                 "toStation": destination, "departure_date": date},
+                 "toStation": destination, "departure_date": date, "format": "json"},
                 what="12306 车票查询")
 
         raw = await with_retry(_query, retries=0, what="12306 车票查询")
@@ -55,6 +55,32 @@ async def query_tickets(origin: str, destination: str, dates: list[str], mode: s
             raise
         return {"mode": "mock", "notice": f"12306 通道暂不可用（{e}），已切换模拟班次表（参考值，§7 降级方案）",
                 "candidates": mock_train_tickets(origin, destination, date), "transport_kind": "train"}
+
+
+def _row_price(r: dict, pick) -> float:
+    """票价提取：12306-mcp(format=json) 把票价放在嵌套 prices[]（按席位），
+    优先取二等座（O），否则取最低可用价；其他社区实现为标量字段，沿用模糊匹配。"""
+    prices = r.get("prices")
+    if isinstance(prices, list):
+        candidates = []
+        for p in prices:
+            if not isinstance(p, dict):
+                continue
+            try:
+                v = float(p.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                candidates.append((str(p.get("seat_type_code") or ""), str(p.get("seat_name") or ""), v))
+        if candidates:
+            second = [v for c, name, v in candidates if c == "O" or "二等" in name]
+            return min(second) if second else min(v for _, _, v in candidates)
+        return 0.0
+    price = pick("price", "secondClass", "edz", "swz") or ""
+    try:
+        return float(str(price).replace("¥", "").replace("元", "").replace(",", "")) if price else 0.0
+    except ValueError:
+        return 0.0
 
 
 def _normalize_12306(raw: object, origin: str, destination: str, date: str) -> list[dict]:
@@ -74,14 +100,12 @@ def _normalize_12306(raw: object, origin: str, destination: str, date: str) -> l
                     if k.lower() in rk.lower() and rv not in (None, ""):
                         return str(rv)
             return ""
-        train_no = pick("trainNo", "train", "code", "stationTrainCode") or pick("trainNo", "train")
-        price = pick("price", "secondClass", "edz", "swz") or pick("price")
-        try:
-            price_f = float(str(price).replace("¥", "").replace("元", "").replace(",", "")) if price else 0.0
-        except ValueError:
-            price_f = 0.0
-        dep, arr = pick("depart", "startTime", "departureTime"), pick("arrive", "arriveTime", "arrivalTime")
-        dur = pick("duration", "历时", "spend")
+        # 12306-mcp 行字段带下划线（start_train_code/start_time/arrive_time/lishi），
+        # pick 是子串匹配，fragment 必须含下划线才能先命中正确键、又不误吞 arrive_date
+        train_no = pick("train_code", "trainNo", "train", "code")
+        price_f = _row_price(r, pick)
+        dep, arr = pick("start_time", "depart", "startTime"), pick("arrive_time", "arrive", "arriveTime")
+        dur = pick("duration", "lishi", "历时", "spend")
         if not train_no or price_f <= 0:
             continue
         out.append({

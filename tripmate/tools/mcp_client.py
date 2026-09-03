@@ -11,22 +11,36 @@ import json
 from contextlib import AsyncExitStack
 from typing import Any
 
+import httpx2
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import MCP_DEFAULT_SSE_READ_TIMEOUT, MCP_DEFAULT_TIMEOUT
 
 from ..config import McpConfig
 from .resilience import ServiceUnavailable, with_retry
 
 
+def _direct_client_factory(**kwargs) -> httpx2.AsyncClient:
+    """MCP HTTP 客户端工厂：端点均为国内服务，trust_env=False 直连。
+
+    实测（2026-09-03）：VPN 系统代理模式下 httpx2 默认 trust_env=True 会把
+    高德/Dida 连接走本地代理，间歇性 ConnectError/TLS 失败；直连则稳定。"""
+    kwargs["trust_env"] = False
+    kwargs.setdefault("follow_redirects", True)
+    return httpx2.AsyncClient(**kwargs)
+
+
 class McpSession:
     """单次连接内调用若干工具后即关闭（短会话，避免子进程常驻）。"""
 
-    def __init__(self, transport: str, command: str = "", url: str = "") -> None:
+    def __init__(self, transport: str, command: str = "", url: str = "",
+                 headers: dict[str, str] | None = None) -> None:
         self._transport = transport  # "stdio" | "sse" | "http"
         self._command = command
         self._url = url
+        self._headers = headers or {}
 
     async def _open(self) -> tuple[AsyncExitStack, ClientSession]:
         stack = AsyncExitStack()
@@ -36,9 +50,16 @@ class McpSession:
                 params = StdioServerParameters(command=parts[0], args=parts[1:])
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif self._transport == "sse":
-                read, write = await stack.enter_async_context(sse_client(self._url))
-            else:  # streamable http
-                read, write, _ = await stack.enter_async_context(streamable_http_client(self._url))
+                read, write = await stack.enter_async_context(
+                    sse_client(self._url, headers=self._headers or None,
+                               httpx_client_factory=_direct_client_factory))
+            else:  # streamable http（本版 mcp 只 yield 两值；鉴权头经预配置 http 客户端注入）
+                http_client = await stack.enter_async_context(
+                    _direct_client_factory(
+                        headers=self._headers or None,
+                        timeout=httpx2.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT)))
+                read, write = await stack.enter_async_context(
+                    streamable_http_client(self._url, http_client=http_client))
             session = ClientSession(read, write)
             await stack.enter_async_context(session)
             await session.initialize()
@@ -106,7 +127,9 @@ def train_session() -> McpSession:
 
 
 def hotel_session() -> McpSession:
+    """Dida 酒店 MCP（Streamable HTTP，Bearer Token 鉴权）。"""
     if not McpConfig.MCP_HOTEL_URL:
-        raise ServiceUnavailable("未配置 MCP_HOTEL_URL（社区酒店 MCP 覆盖不全，默认走模拟）")
+        raise ServiceUnavailable("未配置 MCP_HOTEL_URL（Dida 酒店 MCP）")
+    headers = {"Authorization": f"Bearer {McpConfig.MCP_HOTEL_TOKEN}"} if McpConfig.MCP_HOTEL_TOKEN else None
     transport = "sse" if "/sse" in McpConfig.MCP_HOTEL_URL else "http"
-    return McpSession(transport, url=McpConfig.MCP_HOTEL_URL)
+    return McpSession(transport, url=McpConfig.MCP_HOTEL_URL, headers=headers)

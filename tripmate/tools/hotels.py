@@ -20,11 +20,12 @@ from .search import _IMG_HEADERS, _IMG_TIMEOUT_S, _WATERMARK_HOSTS
 logger = logging.getLogger("tripmate.tools.hotels")
 
 
-async def enrich_hotels(hotels: list, city: str, top: int = 2) -> None:
+async def enrich_hotels(hotels: list, city: str, top: int = 3) -> None:
     """为已勾选的前 top 家酒店补充宣传图与住客评价摘要（需求 6，2026-08-30）。
 
     就地写入 HotelCandidate.image_path / review_digest；任一步失败留空，绝不阻塞主流程
-    （Tavily 未配置/无结果/下载失败均为正常降级）。"""
+    （Tavily 未配置/无结果/下载失败均为正常降级）。
+    top 默认 3（2026-09-03）：PDF 酒店卡片改为 3 选展示。"""
     targets = [h for h in hotels if h.selected][:top]
     if not targets or not SearchConfig.TAVILY_API_KEY:
         return
@@ -88,21 +89,30 @@ async def _hotel_review(client: httpx.AsyncClient, name: str, city: str) -> str:
 
 
 async def query_hotels(city: str, location_pref: str | None, price_range: list[float] | None,
-                       budget_hint: float | None = None) -> dict:
-    """酒店候选查询：真实社区 MCP 优先，未配置/失败降级模拟酒店库（标注参考值）。"""
+                       budget_hint: float | None = None, dates: list[str] | None = None) -> dict:
+    """酒店候选查询：真实酒店 MCP 优先（Dida），未配置/失败降级模拟酒店库（标注参考值）。"""
     notice = None
     candidates: list[dict] = []
+    # Dida 的 price.lowestPrice 是 stayNights 晚的总价，单价须按晚数折算
+    nights = max(1, len(dates) - 1) if dates else 1
     if McpConfig.MCP_HOTEL_URL:
         try:
             session = hotel_session()
 
             async def _q() -> list:
-                return await session.call(("hotel", "search"),
-                                          {"city": city, "keyword": location_pref or "", "checkIn": "", "checkOut": ""},
-                                          what="酒店查询")
+                # Dida searchHotels 嵌套参数；mcp_client 的 schema 过滤只比对顶层键，嵌套 dict 原样透传
+                demand = f"{city} {location_pref} 酒店，2人入住" if location_pref else f"{city} 酒店，2人入住"
+                args: dict = {"place": city, "placeType": "城市", "originQuery": demand, "size": 8}
+                checkin = next((d for d in (dates or []) if len(d) == 10 and d[4] == "-" and d[7] == "-"), "")
+                if checkin:
+                    args["checkInParam"] = {"checkInDate": checkin,
+                                            "stayNights": nights, "adultCount": 2}
+                # 关键词必须唯一切中 searchHotels：getHotelSearchTags 同样含
+                # "hotel"+"search" 且在 list_tools 里排在它前面，宽泛关键词会误中
+                return await session.call(("searchhotels",), args, what="酒店查询")
 
-            raw = await with_retry(_q, retries=0, what="酒店查询")
-            candidates = _normalize_hotels(raw)
+            raw = await with_retry(_q, retries=2, what="酒店查询")
+            candidates = _normalize_hotels(raw, nights=nights)
             if not candidates:
                 raise ServiceUnavailable("酒店 MCP 返回为空")
         except ServiceUnavailable as e:
@@ -123,10 +133,11 @@ async def query_hotels(city: str, location_pref: str | None, price_range: list[f
         hi = max(300.0, budget_hint * 0.18)
     filtered = []
     for c in candidates:
+        pos = c.pop("_pos", None)   # 内部键：Dida 返回的酒店坐标，避免重复查高德
         p = c["price_per_night"]
         if (lo and p < lo) or (hi and p > hi):
             continue
-        c["distance_km"] = await _distance_km(city, c["name"], location_pref)
+        c["distance_km"] = await _distance_km(city, c["name"], location_pref, hotel_pos=pos)
         filtered.append(c)
     if not filtered:  # 区间内无候选时回退全量并提示
         filtered = candidates
@@ -134,8 +145,10 @@ async def query_hotels(city: str, location_pref: str | None, price_range: list[f
     return {"mode": mode, "notice": notice if notice else None, "candidates": filtered[:5]}
 
 
-async def _distance_km(city: str, hotel_name: str, landmark: str | None) -> float:
-    """酒店距地标距离：高德 MCP 双 POI 坐标 + 哈弗辛距离（真实）；降级为确定性参考值。"""
+async def _distance_km(city: str, hotel_name: str, landmark: str | None,
+                       hotel_pos: tuple[float, float] | None = None) -> float:
+    """酒店距地标距离：优先用 MCP 自带的酒店坐标（省一次 POI 查询），高德补地标坐标 + 哈弗辛（真实）；
+    降级为确定性参考值。坐标口径 (lon, lat)。"""
     lm = landmark or kb_for_city(city)["landmark"]
     if McpConfig.AMAP_API_KEY:
         try:
@@ -155,9 +168,25 @@ async def _distance_km(city: str, hotel_name: str, landmark: str | None) -> floa
                     if "," in loc:
                         lon, lat = loc.split(",")[:2]
                         return float(lon), float(lat)
+                # 实测（2026-09-03）：amap MCP 的 text_search 行只有 id/name/address/typecode/photo，
+                # 坐标需按 id 走 search_detail 补齐
+                for p in pois or []:
+                    pid = str(p.get("id", "") or "")
+                    if not pid:
+                        continue
+                    raw_d = await with_retry(
+                        lambda pid=pid: session.call(("detail",), {"id": pid},
+                                                     what=f"高德 POI 详情（{keyword}）"),
+                        retries=0, what="高德 POI 详情")
+                    detail = raw_d if isinstance(raw_d, dict) else {}
+                    loc = str(detail.get("location", "") or "")
+                    if "," in loc:
+                        lon, lat = loc.split(",")[:2]
+                        return float(lon), float(lat)
                 return None
 
-            hotel_pos = await _poi(hotel_name)
+            if hotel_pos is None:
+                hotel_pos = await _poi(hotel_name)
             lm_pos = await _poi(lm)
             if hotel_pos and lm_pos:
                 return round(_haversine(hotel_pos, lm_pos), 1)
@@ -176,7 +205,51 @@ def _haversine(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * 6371 * math.asin(math.sqrt(h))
 
 
-def _normalize_hotels(raw: object) -> list[dict]:
+def _normalize_dida(rows: list, nights: int) -> list[dict]:
+    """Dida searchHotels 行 → HotelCandidate 字段（键集须与模型一致）。
+    price.lowestPrice 为 stayNights 晚总价；坐标随行返回，内部键 _pos 供距离计算复用。"""
+    out = []
+    for r in rows[:10]:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name") or "").strip()
+        price = r.get("price") or {}
+        if not name or not isinstance(price, dict) or not price.get("hasPrice", True):
+            continue
+        try:
+            total = float(price.get("lowestPrice") or 0)
+        except (TypeError, ValueError):
+            continue
+        if total <= 0:
+            continue
+        try:
+            rating = float(r.get("starRating") or 0)
+        except (TypeError, ValueError):
+            rating = 0.0
+        try:
+            pos = (float(r.get("longitude")), float(r.get("latitude")))
+        except (TypeError, ValueError):
+            pos = None
+        item = {
+            "name": name,
+            "price_per_night": round(total / max(1, nights), 1),
+            "distance_km": 1.0,
+            "rating": rating if rating > 0 else 4.5,
+            "link": str(r.get("bookingUrl") or ""),
+            "source": "Dida 酒店 MCP（实时数据）",
+            "reference_only": False,
+        }
+        if pos:
+            item["_pos"] = pos
+        out.append(item)
+    return out
+
+
+def _normalize_hotels(raw: object, nights: int = 1) -> list[dict]:
+    """酒店候选解析：Dida MCP（hotelInformationList，price.lowestPrice 为 stayNights 晚总价）
+    优先；其他社区实现沿用字段名模糊匹配。"""
+    if isinstance(raw, dict) and isinstance(raw.get("hotelInformationList"), list):
+        return _normalize_dida(raw["hotelInformationList"], nights)
     rows = raw if isinstance(raw, list) else []
     if isinstance(raw, dict):
         rows = raw.get("hotels") or raw.get("data") or raw.get("result") or []

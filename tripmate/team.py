@@ -28,13 +28,14 @@ from .llm import TokenBudgetExceeded, check_budget, get_model_client, reset_usag
 from .mocks.data import kb_for_city
 from .models import (Draft, DraftDay, DraftFeedback, FinalDelivery, GuideDigestItem,
                      HotelCandidate, ImageItem, PlanInput, TicketCandidate, TravelProfile)
+from .digest import build_digest_notes
 from .pdf_gen import build_pdf
 from .planning import PACE_SPOTS, analyze_impact, compute_budget, validate_draft
 from .status import AUDIT, StatusBus
 from .tools.hotels import query_hotels, score_and_select as score_hotels
 from .tools.search import search_guides, search_images
 from .tools.tickets import query_tickets, score_and_select as score_tickets
-from .tools.weather import query_weather
+from .tools.weather import near_term_dates, query_weather
 
 AGENT_PROC = "InformationProcessor"
 AGENT_RES = "Researcher"
@@ -271,7 +272,8 @@ def make_booking_tools(ctx: TeamContext):
         basic, detail = prof.basic_info, prof.detail_info
         await ctx.bus.emit(AGENT_MCP, f"酒店查询中…（{basic.destination}｜{detail.hotel.location_pref or '市中心'}）", "STATUS_MCP")
         r = await query_hotels(basic.destination or "", detail.hotel.location_pref,
-                               detail.hotel.price_range, basic.budget)
+                               detail.hotel.price_range, basic.budget,
+                               dates=basic.travel_dates or [])
         await ctx.bus.emit(AGENT_MCP, f"酒店查询完成：{len(r['candidates'])} 家候选", "STATUS_MCP")
         return r
 
@@ -279,7 +281,10 @@ def make_booking_tools(ctx: TeamContext):
         prof: TravelProfile = ctx.bb.profile
         basic = prof.basic_info
         await ctx.bus.emit(AGENT_MCP, f"天气查询中…（{basic.destination}）", "STATUS_MCP")
-        r = await query_weather(basic.destination or "", basic.travel_dates or [])
+        # 兜底日期：travel_dates 为空（如「9月1日-7日中选3天」区间/「近期」）时按预报窗推近端日期，
+        # 区间完全在预报窗外则仍为空（维持"不编造"现状）
+        r = await query_weather(basic.destination or "",
+                                basic.travel_dates or near_term_dates(basic.date_text, basic.days or 3))
         tag = "降级参考值" if r.get("reference_only") else "实时预报"
         await ctx.bus.emit(AGENT_MCP, f"天气查询完成（{tag}）", "STATUS_MCP")
         return r
@@ -759,13 +764,32 @@ class TeamRunner:
             await self.bus.emit("TeamRunner", "护栏：车票候选已由确定性通道补齐", "STATUS_CHECKPOINT")
         if not prof.hotels and basic.destination:
             hr = await query_hotels(basic.destination, detail.hotel.location_pref,
-                                    detail.hotel.price_range, basic.budget)
+                                    detail.hotel.price_range, basic.budget,
+                                    dates=basic.travel_dates or [])
             hotels = [HotelCandidate(**h) for h in score_hotels(hr["candidates"], detail.hotel.price_range)]
             await self.bb.write("hotels", hotels, "booking", "护栏补齐：酒店分区缺失")
             await self.bus.emit("TeamRunner", "护栏：酒店候选已由确定性通道补齐", "STATUS_CHECKPOINT")
-        if not prof.weather and basic.travel_dates and basic.destination:
-            w = await query_weather(basic.destination, basic.travel_dates)
+        if not prof.weather and basic.destination:
+            w = await query_weather(basic.destination,
+                                    basic.travel_dates or near_term_dates(basic.date_text, basic.days or 3))
             await self.bb.write("weather", w, "booking", "护栏补齐：天气分区缺失")
+        # 攻略笔记提炼（PDF 景点简介/美食模块数据源）：限时+容忍解析，失败静默留空走回退。
+        # 幂等：本轮已尝试过（含失败）不再重试，避免阶段过渡反复触发 LLM 调用。
+        if (prof.guide_digest and basic.destination
+                and not (prof.spot_notes or prof.food_notes)
+                and not getattr(self, "_digest_done", False)):
+            self._digest_done = True
+            try:
+                texts = [g.raw_answer for g in prof.guide_digest if g.raw_answer]
+                notes = await build_digest_notes(basic.destination, texts)
+                await self.bb.write("spot_notes", notes["spots"], "researcher",
+                                    "攻略笔记提炼：景点简介/游玩活动")
+                await self.bb.write("food_notes", notes["foods"], "researcher",
+                                    "攻略笔记提炼：美食简介")
+                AUDIT.observation("TeamRunner",
+                                  f"攻略笔记提炼：景点 {len(notes['spots'])} / 美食 {len(notes['foods'])}")
+            except Exception:  # noqa: BLE001 — 提炼失败静默，PDF 走回退版式
+                AUDIT.observation("TeamRunner", "攻略笔记提炼失败（跳过，PDF 走回退）")
         if phase in ("collect", "revise"):
             if not prof.plan_input:
                 resolved = {

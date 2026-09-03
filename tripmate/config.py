@@ -62,8 +62,9 @@ class McpConfig:
     AMAP_MCP_URL: str = _env("AMAP_MCP_URL", "https://mcp.amap.com/sse")
     # 社区 12306-MCP（stdio，默认拉起 npm 包；Node >= 18）
     MCP_12306_COMMAND: str = _env("MCP_12306_COMMAND", "npx -y 12306-mcp")
-    # 酒店 MCP（社区实现，覆盖不全，默认关闭走模拟）
+    # 酒店 MCP（Dida，Streamable HTTP，Bearer Token 鉴权，覆盖全球酒店）
     MCP_HOTEL_URL: str = _env("MCP_HOTEL_URL")
+    MCP_HOTEL_TOKEN: str = _env("MCP_HOTEL_TOKEN")
     TIMEOUT_S: float = 30.0
     RETRIES: int = 2
     RETRY_DELAY_S: float = 5.0

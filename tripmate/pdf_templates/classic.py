@@ -1,16 +1,21 @@
-"""Classic 模板：深蓝旅行手册风（原 pdf_gen 版式的零行为变化迁移，默认模板）。"""
+"""Classic 模板：深蓝旅行手册风（默认模板）。2026-09-03 版式升级：
+逐日行程放大、酒店 3 选卡片、景点图注改简介/活动、新增天气穿搭横幅与美食左图右文模块。"""
 
 from __future__ import annotations
 
 from datetime import datetime
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.units import mm
 from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph,
                                 Spacer, Table, TableStyle)
 
 from ..models import TravelProfile
-from .base import CONTENT_W, BaseTripTemplate, bold_font_name, day_photo, weekday
+from ..tools.weather import outfit_advice, weather_emoji
+from .base import (CONTENT_W, BaseTripTemplate, bold_font_name, day_photo,
+                   emoji_png, weekday)
 
 
 class ClassicTemplate(BaseTripTemplate):
@@ -77,8 +82,40 @@ class ClassicTemplate(BaseTripTemplate):
             story.append(Paragraph(f"每日节奏：{rhythm_line}", st("rhythm", 9, color=self.GRAY)))
         story.append(Spacer(1, 7))
 
-        # ---- 贰 推荐订单清单 ----
-        story.append(self.section("贰", "推荐订单清单（Agent 已按您的要求筛选勾选）"))
+        # ---- 贰 天气与穿搭提醒（确定性规则表；无预报数据时整体隐藏）----
+        wdays = profile.weather.get("days") or []
+        if wdays:
+            w_rows = []
+            for d in wdays[:6]:
+                day_text = str(d.get("day_text", "")) or "—"
+                icon = emoji_png(weather_emoji(day_text), 96)
+                icon_cell = (Image(icon, width=15 * mm, height=15 * mm) if icon else
+                             Paragraph(day_text[:2], st("wfb", 14, bold=True, color=self.PRIMARY,
+                                                        alignment=TA_CENTER)))
+                advice = outfit_advice(day_text, d.get("temp_max"), d.get("temp_min"))
+                w_rows.append([
+                    icon_cell,
+                    Paragraph(str(d.get("date", "")), st("wdate", 10.5, bold=True)),
+                    Paragraph(day_text, st("wtxt", 10.5)),
+                    Paragraph(f"{d.get('temp_min', '?')}~{d.get('temp_max', '?')}℃", st("wtemp", 10.5)),
+                    Paragraph(escape(advice), st("wadv", 9.5, leading=14)),
+                ])
+            wt = Table(w_rows, colWidths=[18 * mm, 27 * mm, 24 * mm, 27 * mm, CONTENT_W - 96 * mm])
+            wt.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [self.BG_LIGHT, colors.white]),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.4, self.HAIRLINE),
+                ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ]))
+            # 标题与表格绑定，避免章节头孤立在页底
+            story.append(KeepTogether([self.section("贰", "天气与穿搭提醒"), Spacer(1, 4), wt]))
+            story.append(Paragraph(f"数据源：{profile.weather.get('source', '')}（预报窗约 16 天，出发前请再次确认）",
+                                   st("wsrc", 8, color=self.GRAY, spaceBefore=3)))
+            story.append(Spacer(1, 7))
+
+        # ---- 叁 推荐订单清单 ----
         hdr = lambda s: Paragraph(s, st("th", 9, bold=True, color=colors.white))  # noqa: E731
 
         def _link_cell(url: str, label: str) -> str:
@@ -98,7 +135,10 @@ class ClassicTemplate(BaseTripTemplate):
                                f"{h.price_per_night:g} 元/晚，距地标 {h.distance_km:g}km，评分 {h.rating:g}",
                                Paragraph(reason, st("reason2", 8.5)),
                                Paragraph(_link_cell(h.link, "携程订房"), st("linkcell2", 8.5))])
-        story.append(self.table(order_rows, [14 * mm, 32 * mm, 50 * mm, 52 * mm, 30 * mm], font_size=8.5))
+        # 标题与表体绑定，避免章节头孤立在页底
+        story.append(KeepTogether([
+            self.section("叁", "推荐订单清单（Agent 已按您的要求筛选勾选）"),
+            self.table(order_rows, [14 * mm, 32 * mm, 50 * mm, 52 * mm, 30 * mm], font_size=8.5)]))
         total_order = sum(tk.price * (2 if "往返" not in tk.train_no else 1) * party
                           for tk in profile.tickets if tk.selected)
         total_order += sum(h.price_per_night * max((basic.days or 1) - 1, 0)
@@ -111,55 +151,58 @@ class ClassicTemplate(BaseTripTemplate):
                                    st("refnote", 8.5, color=self.WARN, spaceAfter=4)))
         story.append(Spacer(1, 7))
 
-        # ---- 叁 逐日行程 ----
-        story.append(self.section("叁", "逐日行程"))
+        # ---- 肆 逐日行程（2026-09-03 版式升级：字号/间距放大，大气易读）----
+        day_flow: list = []
         if profile.draft:
-            slot_st = lambda: st("slot", 9, bold=True, color=self.ACCENT)  # noqa: E731
+            slot_st = lambda: st("slot", 10.5, bold=True, color=self.ACCENT)  # noqa: E731
             for i, day in enumerate(profile.draft.days):
                 wk = weekday(day.date, basic.travel_dates)
                 label = f"DAY {i + 1} · {day.date}" + (f" · {wk}" if wk else "")
                 body_rows = [
                     [Paragraph("上午", slot_st()),
-                     Paragraph(day.morning or "—", st("cell", 9.5))],
+                     Paragraph(day.morning or "—", st("cell", 11, leading=17))],
                     [Paragraph("下午", slot_st()),
-                     Paragraph(day.afternoon or "—", st("cell", 9.5))],
+                     Paragraph(day.afternoon or "—", st("cell", 11, leading=17))],
                     [Paragraph("晚上", slot_st()),
-                     Paragraph(day.evening or "—", st("cell", 9.5))],
+                     Paragraph(day.evening or "—", st("cell", 11, leading=17))],
                 ]
                 strip_path = ""
                 photo = day_photo(day, profile)
                 if photo:
-                    strip_path = self.day_strip(photo, label)
+                    strip_path = self.day_strip(photo, label, h=250)
                 if strip_path:
-                    # 照片头条（178×30mm）+ 白底正文卡；头条与正文间不加分隔，视觉上是一张卡
-                    story.append(Image(strip_path, width=CONTENT_W, height=CONTENT_W * 185 / 1100))
-                    t = Table(body_rows, colWidths=[18 * mm, CONTENT_W - 18 * mm])
+                    # 照片头条（178×40mm）+ 白底正文卡；头条与正文间不加分隔，视觉上是一张卡
+                    story.append(Image(strip_path, width=CONTENT_W, height=CONTENT_W * 250 / 1100))
+                    t = Table(body_rows, colWidths=[20 * mm, CONTENT_W - 20 * mm])
                     t.setStyle(TableStyle([
                         ("BACKGROUND", (0, 0), (0, -1), self.LIGHT),
                         ("LINEBELOW", (0, 0), (-1, -2), 0.4, self.HAIRLINE),
                         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 10),
                     ]))
                 else:
-                    day_rows = [[Paragraph(label, st("day", 11, bold=True, color=colors.white)), ""]] + \
+                    day_rows = [[Paragraph(label, st("day", 13, bold=True, color=colors.white)), ""]] + \
                         body_rows
-                    t = Table(day_rows, colWidths=[18 * mm, CONTENT_W - 18 * mm])
+                    t = Table(day_rows, colWidths=[20 * mm, CONTENT_W - 20 * mm])
                     t.setStyle(TableStyle([
                         ("SPAN", (0, 0), (1, 0)),
                         ("BACKGROUND", (0, 0), (1, 0), self.PRIMARY),
                         ("BACKGROUND", (0, 1), (0, -1), self.LIGHT),
                         ("LINEBELOW", (0, 1), (-1, -2), 0.4, self.HAIRLINE),
                         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 10),
                     ]))
-                story.append(t)
-                story.append(Spacer(1, 5))
+                day_flow.append(t)
+                day_flow.append(Spacer(1, 12))
+        if day_flow:
+            # 标题与首块绑定，避免章节头孤立在页底
+            story.append(KeepTogether([self.section("肆", "逐日行程"), Spacer(1, 3), day_flow[0]]))
+            story.extend(day_flow[1:])
         story.append(Spacer(1, 2))
 
-        # ---- 肆 预算核算 ----
-        story.append(self.section("肆", "预算核算（全团口径）"))
+        # ---- 伍 预算核算 ----
         note = (f"预算 {budget['budget']:g}｜上限 {budget['budget_max']:g}｜"
                 f"占用 {budget['occupancy']:.0%}") if budget["occupancy"] else "—"
         b_rows = [[hdr("项目"), hdr("说明"), hdr("金额（元）")]] + [
@@ -167,7 +210,10 @@ class ClassicTemplate(BaseTripTemplate):
         ]
         b_rows.append([Paragraph("合计", st("bsum", 9.5, bold=True)), Paragraph(note, st("bsumnote", 9)),
                        Paragraph(f"{budget['total']:g}", st("bsumamt", 9.5, bold=True, alignment=2))])
-        story.append(self.table(b_rows, [26 * mm, 112 * mm, 40 * mm], right_cols=(2,)))
+        # 标题与表体绑定，避免章节头孤立在页底
+        story.append(KeepTogether([
+            self.section("伍", "预算核算（全团口径）"),
+            self.table(b_rows, [26 * mm, 112 * mm, 40 * mm], right_cols=(2,))]))
         occ = max(0.0, min(float(budget["occupancy"] or 0), 1.0))
         if occ > 0:
             bar = Table([["", ""]], colWidths=[CONTENT_W * occ, CONTENT_W * (1 - occ)],
@@ -189,29 +235,48 @@ class ClassicTemplate(BaseTripTemplate):
             story.append(Paragraph("※ " + w, st("bwarn", 9.5, color=self.WARN, spaceBefore=3)))
         story.append(Spacer(1, 7))
 
-        # ---- 伍 实景速览 ----
+        # ---- 陆 实景速览（图注：简介 + 游玩建议，不再展示图片来源）----
         if profile.images:
-            story.append(self.section("伍", "实景速览（均标注来源）"))
-            story.append(Spacer(1, 3))
+            note_map = {n.name: n for n in profile.spot_notes}
+
+            def _caption(spot: str) -> str:
+                note = note_map.get(spot)
+                if note is None:  # 精确未命中 → 包含模糊匹配
+                    for name, n in note_map.items():
+                        if spot and (spot in name or name in spot):
+                            note = n
+                            break
+                if note is None:
+                    return ""
+                parts = [p for p in (f"简介：{note.intro}" if note.intro else "",
+                                     f"游玩：{note.activities}" if note.activities else "") if p]
+                return "　".join(parts)
+
+            img_flow: list = []
             imgs = profile.images[:8]
             for r in range(0, len(imgs), 2):
-                row_cells = [self.image_cell(img.spot, img.path, img.source) for img in imgs[r:r + 2]]
+                row_cells = [self.image_cell(img.spot, img.path, source="", caption=_caption(img.spot))
+                             for img in imgs[r:r + 2]]
                 if len(row_cells) == 1:
                     row_cells.append("")
                 t = Table([row_cells], colWidths=[89 * mm, 89 * mm])
                 t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                        ("LEFTPADDING", (0, 0), (-1, -1), 2),
                                        ("RIGHTPADDING", (0, 0), (-1, -1), 2)]))
-                story.append(t)
-                story.append(Spacer(1, 5))
+                img_flow.append(t)
+                img_flow.append(Spacer(1, 5))
+            if img_flow:
+                # 标题与首行绑定，避免章节头孤立在页底
+                story.append(KeepTogether([self.section("陆", "实景速览（景点简介与游玩建议）"),
+                                           Spacer(1, 3), img_flow[0]]))
+                story.extend(img_flow[1:])
             story.append(Spacer(1, 2))
 
-        # ---- 陆 推荐酒店（仅展示已补充信息的勾选酒店）----
-        enriched = [h for h in profile.hotels if (h.image_path or h.review_digest) and h.selected] \
-            or [h for h in profile.hotels if h.image_path or h.review_digest]
-        if enriched:
+        # ---- 柒 推荐酒店（3 选卡片：勾选高亮；图/评价缺失优雅降级）----
+        hotels_top = profile.hotels[:3]
+        if hotels_top:
             hotel_flow: list = []
-            for h in enriched[:2]:
+            for rank, h in enumerate(hotels_top, 1):
                 left_cells = []
                 if h.image_path:  # 空路径直接走文字卡（PIL 对空串的异常发生在 doc.build 期，兜不住）
                     try:
@@ -221,47 +286,80 @@ class ClassicTemplate(BaseTripTemplate):
                         left_cells.append([Paragraph("酒店图片暂缺", st("noimg2", 9, color=self.GRAY))])
                 else:
                     left_cells.append([Paragraph("酒店图片暂缺", st("noimg2", 9, color=self.GRAY))])
+                badge = ('<font face="{}" color="{}">√ 已勾选</font>'.format(bold_font_name(), self.SUCCESS_HEX)
+                         if h.selected else '<font color="#6b7280">备选 {}</font>'.format(rank))
                 right_cells = [
-                    [Paragraph(h.name, st("hname", 11, bold=True))],
-                    [Paragraph(f"★ {h.rating:g}｜{h.price_per_night:g} 元/晚｜距地标 {h.distance_km:g}km"
-                               + ("　<font face=\"{}\" color=\"{}\">√ 已勾选</font>".format(bold_font_name(), self.SUCCESS_HEX)
-                                  if h.selected else ""), st("hmeta", 9))],
-                    [Paragraph(f"网络评价：{h.review_digest}" if h.review_digest else "网络评价：暂无",
-                               st("hreview", 8.5, color=self.GRAY, leading=12))],
+                    [Paragraph(h.name, st("hname", 12, bold=True))],
+                    [Paragraph(f"★ {h.rating:g}｜{h.price_per_night:g} 元/晚｜距地标 {h.distance_km:g}km　{badge}",
+                               st("hmeta", 9.5))],
+                    [Paragraph(f"网络评价：{h.review_digest}" if h.review_digest
+                               else f"推荐理由：{h.reason or '综合评分靠前'}",
+                               st("hreview", 9, color=self.GRAY, leading=13))],
                 ]
                 card = Table([[left_cells, right_cells]], colWidths=[64 * mm, CONTENT_W - 64 * mm])
-                card.setStyle(TableStyle([
-                    ("BOX", (0, 0), (-1, -1), 0.5, self.HAIRLINE),
+                card_cmds = [
+                    ("BOX", (0, 0), (-1, -1), 0.5 if not h.selected else 1.4, self.HAIRLINE),
                     ("VALIGN", (0, 0), (-1, -1), "TOP"),
                     ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                     ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ]))
+                ]
+                if h.selected:
+                    card_cmds.append(("BOX", (0, 0), (-1, -1), 1.4, self.SUCCESS))
+                card.setStyle(TableStyle(card_cmds))
                 hotel_flow.append(card)
-                hotel_flow.append(Spacer(1, 5))
+                hotel_flow.append(Spacer(1, 6))
             # 标题与首卡绑定，避免章节头孤立在页底
-            story.append(KeepTogether([self.section("陆", "推荐酒店（实景 + 网络评价）"),
+            story.append(KeepTogether([self.section("柒", "推荐酒店（3 选 · 实景 + 网络评价）"),
                                        Spacer(1, 3), hotel_flow[0], hotel_flow[1]]))
             story.extend(hotel_flow[2:])
             story.append(Spacer(1, 2))
 
-        # ---- 柒 美食与注意事项 ----
-        story.append(self.section("柒", "美食与注意事项"))
-        foods: list[str] = []
-        for g in profile.guide_digest:
-            foods += g.foods
-        seen_f: set[str] = set()
-        uniq_foods = [f for f in foods if not (f in seen_f or seen_f.add(f))]
-        if uniq_foods:
-            story.append(self.food_grid(uniq_foods))
+        # ---- 捌 美食推荐与注意事项（左图右文逐项；无笔记数据回退名称格）----
+        food_flow: list = []
+        if profile.food_notes:
+            for fn in profile.food_notes[:6]:
+                left_cells: list = []
+                if fn.image_path:
+                    try:
+                        left_cells.append([Image(self.crop_43(fn.image_path), width=45 * mm, height=34 * mm)])
+                    except Exception:  # noqa: BLE001 — 图缺退文字
+                        left_cells.append([Paragraph("图片暂缺", st("fnoimg", 9, color=self.GRAY))])
+                else:
+                    left_cells.append([Paragraph("图片暂缺", st("fnoimg", 9, color=self.GRAY))])
+                right_cells = [
+                    [Paragraph(escape(fn.name), st("fname", 12.5, bold=True))],
+                    [Paragraph(escape(fn.intro) if fn.intro else "　",
+                               st("fintro", 10, leading=15))],
+                ]
+                row = Table([[left_cells, right_cells]], colWidths=[52 * mm, CONTENT_W - 52 * mm])
+                row.setStyle(TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LINEBELOW", (0, 0), (-1, -1), 0.4, self.HAIRLINE),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ]))
+                food_flow.append(row)
         else:
-            # 真实搜索通道结构化字段为空时，回退展示标题含目的地的搜索结果（诚实标注，纯展示，
-            # 过滤 Tavily 对 site: 限定遵守不严带来的无关结果）
-            dest = basic.destination or ""
-            titles = [t for g in profile.guide_digest for t in g.raw_titles if t and dest and dest in t]
-            titles = list(dict.fromkeys(titles))[:5]
-            foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
-                else "暂无（攻略通道未返回）"
-            story.append(Paragraph(foods_text, st("foods", 10)))
+            foods: list[str] = []
+            for g in profile.guide_digest:
+                foods += g.foods
+            seen_f: set[str] = set()
+            uniq_foods = [f for f in foods if not (f in seen_f or seen_f.add(f))]
+            if uniq_foods:
+                food_flow.append(self.food_grid(uniq_foods))
+            else:
+                # 真实搜索通道结构化字段为空时，回退展示标题含目的地的搜索结果（诚实标注，纯展示，
+                # 过滤 Tavily 对 site: 限定遵守不严带来的无关结果）
+                dest = basic.destination or ""
+                titles = [t for g in profile.guide_digest for t in g.raw_titles if t and dest and dest in t]
+                titles = list(dict.fromkeys(titles))[:5]
+                foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
+                    else "暂无（攻略通道未返回）"
+                food_flow.append(Paragraph(foods_text, st("foods", 10)))
+        if food_flow:
+            # 标题与首块绑定，避免章节头孤立在页底
+            story.append(KeepTogether([self.section("捌", "美食推荐与注意事项"), Spacer(1, 4), food_flow[0]]))
+            story.extend(food_flow[1:])
         story.append(Spacer(1, 6))
 
         warns: list[str] = []
@@ -281,11 +379,6 @@ class ClassicTemplate(BaseTripTemplate):
         for i, g in enumerate(profile.guide_digest[:3]):
             story.append(Paragraph(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）",
                                    st("src", 8, color=self.GRAY, spaceBefore=3)))
-        if profile.weather.get("days"):
-            wline = "；".join(f"{d['date']} {d['day_text']} {d.get('temp_min', '?')}~{d.get('temp_max', '?')}℃"
-                             for d in profile.weather["days"])
-            story.append(Paragraph(f"天气参考（{profile.weather.get('source', '')}）：{wline}",
-                                   st("src2", 8, color=self.GRAY, spaceBefore=3)))
         if basic.defaults_applied:
             story.append(Paragraph("默认值说明：以下字段由系统按默认值补齐——" + "、".join(basic.defaults_applied),
                                    st("src3", 8, color=self.WARN, spaceBefore=3)))

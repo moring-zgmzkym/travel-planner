@@ -2,11 +2,95 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date, timedelta
+
 import httpx
 
 from ..config import ALLOW_MOCK_FALLBACK, WeatherConfig
 from ..mocks.data import mock_weather
 from .resilience import ServiceUnavailable, with_retry
+
+# Open-Meteo 预报窗上限（查询参数 forecast_days=16）：窗外逐日一律"超出预报范围"
+_FORECAST_WINDOW_DAYS = 16
+
+# 天气词 → emoji 图案组合（关键词按优先级排列，先长后短；PDF 用 PIL 栅格化，勿直接进 Paragraph）
+_WMO_EMOJI = [
+    ("雷", "⛈️"), ("冰雹", "⛈️"),
+    ("大雪", "❄️❄️"), ("中雪", "🌨️"), ("小雪", "🌨️"), ("雪", "🌨️"),
+    ("暴雨", "⛈️"), ("大雨", "🌧️"), ("阵雨", "🌦️"), ("雨", "🌦️"),
+    ("雾", "🌫️"), ("霾", "😷"),
+    ("多云转晴", "🌤️"), ("多云", "⛅"), ("阴", "☁️"), ("晴", "☀️"),
+]
+
+
+def weather_emoji(day_text: str) -> str:
+    """天气词 → emoji 图案组合（PDF 天气模块用）；未命中返回多云兜底。"""
+    for key, icon in _WMO_EMOJI:
+        if key in (day_text or ""):
+            return icon
+    return "⛅"
+
+
+def outfit_advice(day_text: str, temp_max, temp_min) -> str:
+    """确定性穿搭建议（纯文本，不含 emoji——emoji 由模板栅格化单独出图）。
+
+    降水提醒优先，其余按最高温分档；昼夜温差 ≥10℃ 追加分层提醒；温度缺失给通用建议。"""
+    day_text = day_text or ""
+    tips: list[str] = []
+    if any(k in day_text for k in ("雨", "雷")):
+        tips.append("有降水，务必带伞或雨衣，穿防滑防水鞋")
+    if "雪" in day_text:
+        tips.append("降雪路滑，注意保暖防滑")
+    t = temp_max if isinstance(temp_max, (int, float)) else None
+    tmin = temp_min if isinstance(temp_min, (int, float)) else None
+    if t is None:
+        tips.append("气温不明，建议洋葱式分层穿搭，出发前再次查看预报")
+    elif t >= 32:
+        tips.append("高温酷暑：透气速干短袖，防晒霜、遮阳帽、墨镜，多次补水")
+    elif t >= 27:
+        tips.append("炎热：短袖配轻薄裤装，注意防晒，午间减少暴晒")
+    elif t >= 21:
+        tips.append("舒适：短袖或薄长袖即可，早晚备一件薄外套")
+    elif t >= 14:
+        tips.append("微凉：长袖加外套或卫衣，早晚温差注意添衣")
+    elif t >= 6:
+        tips.append("偏冷：厚外套或夹棉，内搭长袖保暖")
+    else:
+        tips.append("寒冷：羽绒服加保暖内搭，手套围巾齐上")
+    if t is not None and tmin is not None and t - tmin >= 10:
+        tips.append("昼夜温差大，建议洋葱式分层穿搭")
+    return "；".join(tips) if tips else "轻装出行"
+
+
+def near_term_dates(date_text: str, days: int, today: date | None = None) -> list[str]:
+    """travel_dates 缺失时的天气查询日期兜底（纯函数）。
+
+    - date_text 含「M月D日」区间：解析首末日期（年份取当前），与预报窗 [明天, 今天+15]
+      求交集，取交集前 days 天；区间与预报窗无交集（如国庆行程在 9 月查询）→ 返回空，
+      维持"不编造、标注超出预报范围"的现状，不用错期天气冒充；
+    - 解析不到任何日期（如「近期」）→ 明天起 days 天。
+    """
+    today = today or date.today()
+    days = max(1, days)
+    win_lo, win_hi = today + timedelta(days=1), today + timedelta(days=_FORECAST_WINDOW_DAYS - 1)
+
+    parsed: list[date] = []
+    for m in re.finditer(r"(\d{1,2})月(\d{1,2})[日号]", date_text or ""):
+        try:
+            parsed.append(date(today.year, int(m.group(1)), int(m.group(2))))
+        except ValueError:  # 非法日期（如 13月）忽略
+            continue
+
+    if parsed:
+        lo, hi = min(parsed), max(parsed)
+        lo, hi = max(lo, win_lo), min(hi, win_hi)
+        if lo > hi:
+            return []
+        span = (hi - lo).days + 1
+        return [(lo + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(min(days, span))]
+
+    return [(win_lo + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
 
 WMO = {
     0: "晴", 1: "多云转晴", 2: "多云", 3: "阴", 45: "雾", 48: "雾凇",

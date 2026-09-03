@@ -109,6 +109,22 @@ class ImageItem(BaseModel):
     note: str = ""
 
 
+class SpotNote(BaseModel):
+    """景点笔记（PDF 实景速览图注用）：LLM 从攻略原文提炼，失败留空走回退。"""
+
+    name: str
+    intro: str = ""       # 一句话简介（≤60 字）
+    activities: str = ""  # 游玩活动建议（≤60 字）
+
+
+class FoodNote(BaseModel):
+    """美食笔记（PDF 美食模块用）：LLM 提炼 + Tavily 搜图（food_ 前缀落盘）。"""
+
+    name: str
+    intro: str = ""       # 一句话简介（≤50 字）
+    image_path: str = ""
+
+
 class DraftDay(BaseModel):
     date: str
     morning: str = ""
@@ -172,6 +188,8 @@ class TravelProfile(BaseModel):
     hotels: list[HotelCandidate] = Field(default_factory=list)
     weather: dict[str, Any] = Field(default_factory=dict)
     images: list[ImageItem] = Field(default_factory=list)
+    spot_notes: list[SpotNote] = Field(default_factory=list)
+    food_notes: list[FoodNote] = Field(default_factory=list)
     plan_input: PlanInput | None = None
     draft: Draft | None = None
     draft_feedback: DraftFeedback | None = None
