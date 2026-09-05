@@ -246,8 +246,12 @@ async def _chat_worker(ws: WebSocket, sess: Session, q: asyncio.Queue) -> None:
         await _send(_route_ws(sess, ws), {"type": "usage", "usage": usage_summary()}, sess)
 
 
-async def _sender(ws: WebSocket, sess: Session) -> None:
+async def _sender(ws: WebSocket, sess: Session, sub=None, last_seq: int = 0) -> None:
     """WS 发送协程：状态总线 + 团队事件双路复用（持久任务，避免漏消费）。
+
+    sub/last_seq（修复 #17 补播窗口）：ws_endpoint 先订阅再补播——补播期间产生的事件
+    落在订阅队列里不丢；sender 按 seq > last_seq 丢弃与补播历史重复的条目。缺省参数
+    保持旧调用（订阅在协程内创建、不去重）兼容。
 
     协作式交接（2026-09-05）：启动时自认领 sess._sender_task；新连接的 sender 认领后，
     旧 sender 成为 stale——状态事件丢弃副本（新 sender 订阅队列有自己的同条副本，
@@ -260,7 +264,8 @@ async def _sender(ws: WebSocket, sess: Session) -> None:
     断开/取消时退订本会话总线（多会话隔离：不残留订阅、不串台）。
     """
     sess._sender_task = asyncio.current_task()
-    sub = sess.bus.subscribe()
+    if sub is None:
+        sub = sess.bus.subscribe()
     status_task = asyncio.create_task(sub.get())
     event_task = asyncio.create_task(sess.team_events.get())
     try:
@@ -285,7 +290,7 @@ async def _sender(ws: WebSocket, sess: Session) -> None:
                         await _push_stream_error(sess, f"推送通道异常：{e}")
                     continue
                 if is_status:
-                    if not stale:  # stale 副本丢弃：新 sender 有同条副本，避免重复推送
+                    if not stale and item.get("seq", 0) > last_seq:  # 补播窗口去重（修复 #17）
                         await _send(ws, item)  # STATUS_* / AGENT_MESSAGE
                 else:
                     try:
@@ -340,18 +345,24 @@ async def ws_endpoint(ws: WebSocket) -> None:
     sess._live_ws = ws  # 会话当前活动连接：迟到的回复/卡片经 _route_ws 送达本连接
     sender = None
     try:
+        # 先订阅再补播（修复 #17 补播窗口）：补播期间产生的状态事件进入订阅队列，
+        # 由 sender 按 seq > last_seq 去重后送达——不再存在"补播与订阅之间丢事件"。
+        # last_seq 必须在补播快照之后取：它同时覆盖"订阅→快照之间"（历史+队列双份）的窗口
+        sub = sess.bus.subscribe()
         history_n, chat_n = len(sess.bus.history()), len(sess.chat_history())
         if not await _replay_snapshot(ws, sid, sess):
+            sess.bus.unsubscribe(sub)
             try:
                 await ws.close()
             except Exception:  # noqa: BLE001 — socket 可能已断开（正是坏会话重连场景），关闭失败无需处理
                 pass
             return
+        last_seq = sess.bus.last_seq()
         AUDIT.output("Gateway", f"WS 连接 sid={sid}｜补播状态 {history_n} 条 / 聊天 {chat_n} 条")
 
         # 协作式交接（2026-09-05）：不强杀旧 sender——旧 sender 处理完手头事件后
         # 自检"已非当前 sender"退出；在途团队事件经 _route_ws 送达本连接，不丢失。
-        sender = asyncio.create_task(_sender(ws, sess))
+        sender = asyncio.create_task(_sender(ws, sess, sub=sub, last_seq=last_seq))
         chat_q: asyncio.Queue = asyncio.Queue()
         worker = asyncio.create_task(_chat_worker(ws, sess, chat_q))
         try:

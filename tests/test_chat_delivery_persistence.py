@@ -307,3 +307,47 @@ def test_cancel_current_chat_task():
         assert _cancel_current_chat(s) is False  # 无在途任务 → 幂等
 
     asyncio.run(main())
+
+
+def test_sender_dedup_by_seq_after_replay_window(monkeypatch):
+    """修复 #17 补播窗口：先订阅再补播后，sender 按 seq > last_seq 去重——
+    补播历史里已有的事件（seq<=last_seq）不再二次推送，新事件（seq>last_seq）不丢。"""
+    import asyncio
+    from tripmate.status import StatusBus
+    import tripmate.gateway.app as app
+
+    _no_save(monkeypatch)
+    bus = StatusBus(replay_limit=80)
+
+    async def main():
+        # 历史里已有事件 seq 1、2（补播会重放它们）
+        await bus.emit("TeamRunner", "e1", "STATUS_INFO")
+        await bus.emit("TeamRunner", "e2", "STATUS_INFO")
+        last_seq = bus.last_seq()
+        assert last_seq == 2
+
+        # 重连场景：先订阅；e3 在"订阅→补播快照"窗口内产生 → 既在历史又在队列
+        sub = bus.subscribe()
+        await bus.emit("TeamRunner", "e3", "STATUS_INFO")
+        replayed = [e for e in bus.history()]          # 补播重放 e1..e3
+        assert [e["seq"] for e in replayed] == [1, 2, 3]
+        # ws_endpoint 的顺序：last_seq 在补播快照之后取 → 覆盖 e3 所在窗口
+        last_seq = bus.last_seq()
+
+        ws = _FakeWS("w")
+        import types
+        s = types.SimpleNamespace(_sender_task=None, team_events=asyncio.Queue(), bus=bus,
+                                  _live_ws=None)
+        sender = asyncio.create_task(app._sender(ws, s, sub=sub, last_seq=last_seq))
+        await bus.emit("TeamRunner", "e4", "STATUS_INFO")   # 新事件 → 必达
+        await asyncio.sleep(0.15)
+        sender.cancel()
+        try:
+            await sender
+        except asyncio.CancelledError:
+            pass
+        status_texts = [m["text"] for m in ws.sent if m.get("type") == "status"]
+        # e3 被 seq 去重丢弃（补播已含），e4 正常送达
+        assert "e3" not in status_texts and "e4" in status_texts
+
+    asyncio.run(main())

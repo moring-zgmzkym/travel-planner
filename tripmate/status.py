@@ -38,6 +38,7 @@ class StatusBus:
     def __init__(self, replay_limit: int = 80) -> None:
         self._subs: list[asyncio.Queue] = []
         self._history: deque[dict] = deque(maxlen=replay_limit)
+        self._seq = 0               # 事件单调序号（补播窗口去重：先订阅再补播，按 seq 丢弃重复）
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
@@ -51,9 +52,15 @@ class StatusBus:
     def history(self) -> list[dict]:
         return list(self._history)
 
+    def last_seq(self) -> int:
+        """历史中最大事件序号（重连补播的去重基线；空历史为 0）。"""
+        return self._history[-1]["seq"] if self._history else 0
+
     async def emit(self, agent: str, text: str, kind: str = "STATUS_PROGRESS", **extra) -> None:
+        self._seq += 1
         event = {
             "type": "status",
+            "seq": self._seq,
             "kind": kind,
             "agent": agent,
             "text": text,
