@@ -75,12 +75,17 @@ def test_persistence_roundtrip():
         from tripmate.session import Session
         s = Session(sid)
         s.bb.profile.basic_info = BasicInfo(origin="上海", destination="成都", days=3)
-        s.record_chat({"type": "chat", "role": "user", "text": "帮我规划成都"})
         draft = Draft(days=[DraftDay(date="2026-10-01", morning="m", afternoon="a",
                                      evening="e", spots=["s"])], budget_total=1.0)
-        asyncio.run(s.bb.write("draft", draft, "planner", "测试草稿"))
+
+        async def main():
+            s.record_chat({"type": "chat", "role": "user", "text": "帮我规划成都"})
+            await s.bb.write("draft", draft, "planner", "测试草稿")
+            await s.flush()  # 异步单飞落盘（2026-09-05 去阻塞）：断言前显式冲刷
+
+        asyncio.run(main())
         version = s.bb.version()
-        assert session_path(sid).exists()  # record_chat 与黑板写都触发落盘
+        assert session_path(sid).exists()  # record_chat 与黑板写都触发（合并）落盘
 
         s2 = Session(sid)  # 模拟服务重启后的新 Session
         assert [m["text"] for m in s2.chat_history()] == ["帮我规划成都"]
@@ -238,5 +243,67 @@ def test_replay_history_failure_closes_connection(monkeypatch):
         ws = _FakeWS()
         ok = await app._replay_snapshot(ws, "default", s)
         assert ok is False
+
+    asyncio.run(main())
+
+
+def test_flush_coalesces_writes(monkeypatch):
+    """单飞合并：多次触发只做一次实际写盘（在途置脏 → 尾随补写收敛）。"""
+    import asyncio
+    from tripmate.session import Session
+    calls = {"n": 0}
+
+    saved = []
+
+    def fake_save(sid, chats, profile):
+        calls["n"] += 1
+        saved.append(profile)
+
+    monkeypatch.setattr("tripmate.session.save_session", fake_save)
+    s = Session("t-coalesce")
+    s.sid = "t-coalesce"  # 确保落盘路径启用
+
+    async def main():
+        s.record_chat({"type": "chat", "role": "user", "text": "1"})
+        await s.bb.apply_basic_info({"origin": "上海"}, "chatter", "t")
+        await s.bb.apply_basic_info({"budget": 5000.0}, "chatter", "t")
+        await s.flush()
+
+    asyncio.run(main())
+    # 3 次触发 → 2 次写：record_chat 起飞的在途写期间，两次黑板写被合并为尾随一次。
+    # （同步落盘时代是 3 次全量写；关键性质是写入次数不随触发次数线性膨胀且终态完整）
+    assert calls["n"] == 2
+    assert saved[-1]["basic_info"]["origin"] == "上海"
+    assert saved[-1]["basic_info"]["budget"] == 5000.0
+
+
+def test_cancel_current_chat_task():
+    """stop 联动：取消正在进行的消息处理任务（修复 #10：处理期间 stop 可达）。"""
+    import asyncio
+    from tripmate.gateway.app import _cancel_current_chat
+    from tripmate.session import Session
+
+    s = Session()
+
+    async def main():
+        started = asyncio.Event()
+
+        async def slow():
+            started.set()
+            await asyncio.sleep(30)
+
+        task = asyncio.create_task(slow())
+        s.current_chat_task = task
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert _cancel_current_chat(s) is True
+        with_state = asyncio.Event()
+        try:
+            await task
+        except asyncio.CancelledError:
+            with_state.set()
+        await asyncio.wait_for(with_state.wait(), timeout=1)
+        assert task.cancelled()
+        s.current_chat_task = None
+        assert _cancel_current_chat(s) is False  # 无在途任务 → 幂等
 
     asyncio.run(main())

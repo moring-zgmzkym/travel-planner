@@ -62,6 +62,11 @@ class Session:
         )
         self.chatter = build_chatter(self.bb, self.bus, self.runner)
         self.chatter_lock = asyncio.Lock()
+        # 当前正在处理的用户消息任务（stop 按钮联动中断）
+        self.current_chat_task: asyncio.Task | None = None
+        # 异步落盘单飞状态：_dirty=在途落盘期间又有新写入（尾随补写）
+        self._flush_task: asyncio.Task | None = None
+        self._dirty = False
         # 聊天历史（2026-09-03 断线丢回复根治）：创建即记录，与发送成败无关；
         # 断线重连时网关全量补播（此前只补状态时间线，断线窗口里的回复用户零收到）。
         self._chat_history: deque[dict] = deque(maxlen=200)
@@ -86,24 +91,67 @@ class Session:
             except Exception as e:  # noqa: BLE001 — 恢复失败按全新会话处理（不阻塞启动）
                 AUDIT.output("Persistence", f"会话画像恢复失败（{type(e).__name__}: {e}），按全新会话处理")
 
-    def _persist(self) -> None:
+    def _schedule_flush(self) -> None:
+        """单飞合并落盘（2026-09-05 去阻塞）：一次写盘在途时只置脏标记，写完尾随补一次。
+
+        此前每次黑板写/每条聊天都在事件循环线程上同步全量序列化+写盘（Windows 单次可达
+        几十毫秒），规划期间几十次写叠加会卡住所有会话的 WS 推送与 LLM 流式转发。"""
         if not self.sid:
             return
+        self._dirty = True
+        if self._flush_task is None or self._flush_task.done():
+            self._dirty = False
+            self._flush_task = asyncio.get_running_loop().create_task(self._flush_once())
+
+    async def _write_once(self) -> None:
+        """快照在事件循环线程上取（跨线程序列化会撞并发修改），json 序列化+写盘进线程。"""
         profile = self.bb.profile.model_dump(mode="json")
         profile.pop("changelog", None)  # 重启后检查点基线重置，旧条目无用且防文件无限膨胀
-        save_session(self.sid, list(self._chat_history), profile)
+        chats = list(self._chat_history)
+        await asyncio.to_thread(save_session, self.sid, chats, profile)
+
+    async def _flush_once(self) -> None:
+        try:
+            while True:
+                self._dirty = False
+                await self._write_once()
+                if not self._dirty:
+                    break
+        except Exception as e:  # noqa: BLE001 — 落盘失败绝不影响聊天/规划主流程
+            AUDIT.output("Persistence", f"会话状态异步落盘失败（{type(e).__name__}: {e}）")
+        finally:
+            self._flush_task = None
+        # 收尾与置脏竞争的兜底：刚清完任务标记的瞬间又置脏 → 再补一轮
+        if self._dirty and self._flush_task is None:
+            self._schedule_flush()
+
+    async def flush(self) -> None:
+        """等待在途落盘完成并立即补写尾随变更（停机钩子与测试断言用）。"""
+        if not self.sid:
+            return
+        while self._flush_task is not None and not self._flush_task.done():
+            try:
+                await self._flush_task
+            except Exception:  # noqa: BLE001
+                pass
+        self._dirty = False
+        await self._write_once()
 
     def _persist_profile(self) -> None:
-        """黑板 on_change 钩子：任何写入后落盘（自身异常已在钩子层兜底）。"""
-        self._persist()
+        """黑板 on_change 钩子：任何写入后调度落盘（自身异常已在钩子层兜底）。"""
+        self._schedule_flush()
 
     def record_chat(self, payload: dict) -> None:
         """记录一条聊天消息（创建点调用，恰好一次；不含状态时间线事件）。"""
         self._chat_history.append(dict(payload))
-        self._persist()
+        self._schedule_flush()
 
     def chat_history(self) -> list[dict]:
         return list(self._chat_history)
+
+    def rebuild_chatter(self) -> None:
+        """重建 Chatter 实例：超时/异常/被取消后丢弃被污染的对话上下文（与既有路径同源）。"""
+        self.chatter = build_chatter(self.bb, self.bus, self.runner)
 
     async def handle_user_message(self, text: str) -> str:
         """用户消息 → 聊天 Agent（串行化：同一时刻仅一次 Chatter 运行）。

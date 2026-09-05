@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -25,7 +26,19 @@ from ..status import AUDIT, event_json
 
 from ..persistence import safe_sid
 
-app = FastAPI(title="TripMate 多 Agent 协同旅游规划系统")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """停机钩子：等待/补写所有会话的在途异步落盘（防抖后的尾随增量不丢）。"""
+    yield
+    for sess in sessions.values():
+        try:
+            await sess.flush()
+        except Exception:  # noqa: BLE001 — 停机落盘失败不阻塞进程退出
+            pass
+
+
+app = FastAPI(title="TripMate 多 Agent 协同旅游规划系统", lifespan=lifespan)
 
 # sender 协作交接的空闲检查间隔（秒）：无事件在途时超时醒来做身份检查，stale 即退出
 _SENDER_IDLE_TIMEOUT_S = 60.0
@@ -191,6 +204,48 @@ async def _handle_team_event(ws: WebSocket, sess: Session, item) -> None:
                                "text": "规划团队遇到错误，请查看状态时间线或重试。"})
 
 
+def _cancel_current_chat(sess: Session) -> bool:
+    """stop 按钮联动：中断正在进行的用户消息处理（此前 stop 消息压在 socket 缓冲里
+    根本读不到——用户无法停止卡死的处理）。返回是否发生了中断。"""
+    t = sess.current_chat_task
+    if t is not None and not t.done():
+        t.cancel()
+        return True
+    return False
+
+
+async def _chat_worker(ws: WebSocket, sess: Session, q: asyncio.Queue) -> None:
+    """聊天处理 worker（2026-09-05 修复 #10）：WS 接收循环只入队，处理在独立任务串行进行——
+    处理期间（最坏 ~30 分钟）stop 按钮与前端 25s 心跳 ping 此前全部失灵。
+
+    FIFO 队列保证多条消息按序处理（与原串行语义一致）；chatter_lock 继续承担
+    跨连接/转述的互斥。"""
+    while True:
+        text = await q.get()
+        task = asyncio.create_task(sess.handle_user_message(text))
+        sess.current_chat_task = task
+        try:
+            reply = await task
+        except asyncio.CancelledError:
+            if task.cancelled():
+                # stop 中断当前处理：与超时路径同源——重建 Chatter 丢弃被中断的上下文
+                sess.rebuild_chatter()
+                await _chat(ws, sess, {"type": "chat", "role": "system",
+                                       "text": "已停止当前消息处理。"})
+                continue
+            task.cancel()  # worker 自身被取消（连接断开）：子任务一并终止后透传
+            sess.rebuild_chatter()
+            raise
+        except Exception as e:  # noqa: BLE001 — 用户可见错误也要反馈
+            AUDIT.output("Gateway", f"用户消息处理异常（{type(e).__name__}: {e}）")
+            reply = "（系统提示）刚才的请求没有处理成功，请稍后重试；若持续失败请重启服务。"
+        finally:
+            sess.current_chat_task = None
+        await _chat(ws, sess, {"type": "chat", "role": "chatter", "text": reply or "（无回复）"})
+        await _send(_route_ws(sess, ws), {"type": "profile", "profile": sess.profile_snapshot()}, sess)
+        await _send(_route_ws(sess, ws), {"type": "usage", "usage": usage_summary()}, sess)
+
+
 async def _sender(ws: WebSocket, sess: Session) -> None:
     """WS 发送协程：状态总线 + 团队事件双路复用（持久任务，避免漏消费）。
 
@@ -297,6 +352,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
         # 协作式交接（2026-09-05）：不强杀旧 sender——旧 sender 处理完手头事件后
         # 自检"已非当前 sender"退出；在途团队事件经 _route_ws 送达本连接，不丢失。
         sender = asyncio.create_task(_sender(ws, sess))
+        chat_q: asyncio.Queue = asyncio.Queue()
+        worker = asyncio.create_task(_chat_worker(ws, sess, chat_q))
         try:
             while True:
                 raw = await ws.receive_text()
@@ -310,9 +367,12 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         await _send(ws, {"type": "pong", "ts": msg.get("ts")})
                     elif kind == "stop":
                         receipt = sess.runner.cancel(reason="用户点击停止按钮")
+                        interrupted = _cancel_current_chat(sess)
                         text = ("已停止当前规划任务。已收集的攻略/车票/酒店数据保留，"
                                 "补充信息后可重新启动。") if receipt["status"] == "cancelled" \
                             else "当前没有进行中的规划任务。"
+                        if interrupted:
+                            text += "正在处理的下一条消息也已中断。"
                         await _chat(ws, sess, {"type": "chat", "role": "system", "text": text})
                     elif kind == "template":
                         name = (msg.get("name") or "").strip()
@@ -344,14 +404,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             await sess.bus.emit("Chatter", "已收到您的消息，正在处理…", "STATUS_INFO")
                         except Exception:  # noqa: BLE001 — 回执失败不影响主流程
                             pass
-                        try:
-                            reply = await sess.handle_user_message(text)
-                        except Exception as e:  # noqa: BLE001 — 用户可见错误也要反馈
-                            AUDIT.output("Gateway", f"用户消息处理异常（{type(e).__name__}: {e}）")
-                            reply = "（系统提示）刚才的请求没有处理成功，请稍后重试；若持续失败请重启服务。"
-                        await _chat(ws, sess, {"type": "chat", "role": "chatter", "text": reply or "（无回复）"})
-                        await _send(_route_ws(sess, ws), {"type": "profile", "profile": sess.profile_snapshot()}, sess)
-                        await _send(_route_ws(sess, ws), {"type": "usage", "usage": usage_summary()}, sess)
+                        # 处理移入 worker（修复 #10）：接收循环立即回到 receive_text，
+                        # stop/ping 在处理期间保持实时可达
+                        chat_q.put_nowait(text)
                 except Exception as e:  # noqa: BLE001 — 单条消息处理失败不烧连接（2026-09-04 加固：
                     # 此前仅捕获 WebSocketDisconnect，任意分支异常都会炸掉 WS 处理器）
                     AUDIT.output("Gateway", f"WS 消息处理异常（{type(e).__name__}: {e}）")
@@ -362,6 +417,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     finally:
         if sender is not None:
             sender.cancel()
+        worker.cancel()
         if getattr(sess, "_live_ws", None) is ws:
             sess._live_ws = None
         AUDIT.output("Gateway", f"WS 断开 sid={sid}")
