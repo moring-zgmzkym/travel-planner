@@ -81,3 +81,52 @@ def test_days_change_keeps_explicit_dates_and_ignores_invalid():
     updates2 = {"days": 2}
     _reexpand_dates_after_days_change(updates2, prof2)
     assert "travel_dates" not in updates2
+
+
+def test_pre_coerce_field_dirty_llm_inputs():
+    """LLM 脏输入宽松转型："3天"→3、"6000元"→6000.0、"休闲"→["休闲"]、"300-500"→[300.0,500.0]。"""
+    from tripmate.chatter import _pre_coerce_field
+    assert _pre_coerce_field("days", "3天") == 3
+    assert _pre_coerce_field("party_size", "2大1小") == 2
+    assert _pre_coerce_field("budget", "6000元") == 6000.0
+    assert _pre_coerce_field("budget_max", "1.2万") == 12000.0
+    assert _pre_coerce_field("style", "休闲") == ["休闲"]
+    assert _pre_coerce_field("price_range", "300-500") == [300.0, 500.0]
+    # 正常值原样通过
+    assert _pre_coerce_field("days", 3) == 3
+    assert _pre_coerce_field("origin", "上海") == "上海"
+
+
+def test_check_budget_per_run_baseline_isolation():
+    """per-run 基线：多会话各自记账，B 会话重锚不影响 A 的熔断判定（2026-09-05 修复）。"""
+    import asyncio
+    from autogen_core.models import RequestUsage
+    from tripmate import llm
+    from tripmate.config import BudgetConfig
+
+    class FakeClient:
+        def __init__(self, used):
+            self._u = used
+        def total_usage(self):
+            return self._u
+
+    async def main():
+        old = llm._client
+        llm._client = FakeClient(RequestUsage(prompt_tokens=100000, completion_tokens=0))
+        try:
+            baseline_a = llm.snapshot_usage()
+            # 进程累计涨到 700000（含 B 会话此前烧掉的 600000）
+            llm._client = FakeClient(RequestUsage(prompt_tokens=700000, completion_tokens=0))
+            # A 的 per-run 基线是 100000 → 本 run 消耗 600000 = 超限 → 熔断
+            try:
+                llm.check_budget(baseline_a)
+                raised = False
+            except llm.TokenBudgetExceeded:
+                raised = True
+            assert raised
+            # 另一会话基线 650000 → 本 run 消耗 50000 → 不熔断（互不干扰）
+            llm.check_budget(RequestUsage(prompt_tokens=650000, completion_tokens=0))
+        finally:
+            llm._client = old
+
+    asyncio.run(main())

@@ -24,7 +24,7 @@ from autogen_agentchat.teams import SelectorGroupChat
 from . import prompts
 from .blackboard import Blackboard
 from .config import BudgetConfig, JobConfig, ServerConfig
-from .llm import TokenBudgetExceeded, check_budget, get_model_client, reset_usage
+from .llm import TokenBudgetExceeded, check_budget, get_model_client, reset_usage, snapshot_usage
 from .mocks.data import kb_for_city
 from .models import (Draft, DraftDay, DraftFeedback, FinalDelivery, GuideDigestItem,
                      HotelCandidate, ImageItem, PlanInput, TicketCandidate, TravelProfile)
@@ -234,6 +234,8 @@ def make_researcher_tools(ctx: TeamContext):
             ctx.jobs.submit("guides", _guide_job())
         try:
             r = await ctx.jobs.collect("guides")
+        except TokenBudgetExceeded:
+            raise  # 熔断不得被降级链吞掉（否则要拖到下一条消息才生效）
         except Exception as exc:  # noqa: BLE001 — 收割失败降级，攻略分区交由护栏补齐（2026-09-04 加固）
             AUDIT.observation(AGENT_RES, f"攻略任务收割失败：{type(exc).__name__}: {exc}")
             ctx.state.step = "MCP_COLLECT"
@@ -380,6 +382,8 @@ def make_booking_tools(ctx: TeamContext):
                 await ctx.bb.write("tickets", tickets, "booking", "车票候选与勾选" + ("（降级参考值）" if tr["mode"] == "mock" else "（MCP 实时）"))
                 if tr.get("notice"):
                     reuse_notes.append(tr["notice"])
+            except TokenBudgetExceeded:
+                raise  # 熔断不得被降级链吞掉
             except Exception as exc:  # noqa: BLE001 — 单通道失败降级为空候选，不阻塞收割
                 AUDIT.observation(AGENT_MCP, f"车票通道收割失败，降级为空候选：{type(exc).__name__}: {exc}")
                 tickets = []
@@ -397,6 +401,8 @@ def make_booking_tools(ctx: TeamContext):
                 await ctx.bb.write("hotels", hotels, "booking", "酒店候选与勾选" + ("（降级参考值）" if hr["mode"] == "mock" else "（MCP 实时）"))
                 if hr.get("notice"):
                     reuse_notes.append(hr["notice"])
+            except TokenBudgetExceeded:
+                raise  # 熔断不得被降级链吞掉
             except Exception as exc:  # noqa: BLE001 — 单通道失败降级为空候选，不阻塞收割
                 AUDIT.observation(AGENT_MCP, f"酒店通道收割失败，降级为空候选：{type(exc).__name__}: {exc}")
                 hotels = []
@@ -417,6 +423,8 @@ def make_booking_tools(ctx: TeamContext):
             try:
                 weather = await ctx.jobs.collect("weather")
                 await ctx.bb.write("weather", weather, "booking", "出行天气")
+            except TokenBudgetExceeded:
+                raise  # 熔断不得被降级链吞掉
             except Exception as exc:  # noqa: BLE001 — 天气失败降级为空（草稿标注暂缺）
                 AUDIT.observation(AGENT_MCP, f"天气通道收割失败，降级为空：{type(exc).__name__}: {exc}")
                 weather = prof.weather or {}
@@ -618,6 +626,9 @@ class TeamRunner:
         self._cover_done = False             # 封面图检索幂等标志（同上）
         self.active = False                  # 规划态标志（闲置态 = False，验收 #2）
         self._last_destination = ""          # 上一轮目的地（新一轮规划时清空数据分区的判据）
+        # 每 run token 基线（2026-09-05）：模块级基线是进程级单例，多会话并发时
+        # 互相重锚/互相熔断——per-run 基线由本 runner 持有并显式传入 check_budget
+        self._usage_baseline = None
 
     # ---- §3.3 Tool 入参/出参契约 ----
     def start(self, task: str = "plan_trip", options: dict | None = None) -> dict:
@@ -628,7 +639,8 @@ class TeamRunner:
             return {"status": "rejected", "reason": f"画像缺少不可默认字段：{'、'.join(missing)}"}
         if self.active and self._task and not self._task.done():
             return {"status": "rejected", "reason": "团队正在运行中，请等待当前阶段完成"}
-        reset_usage()  # 熔断语义为"单次完整规划"（§2.3）：计数器本体进程级累计，新一轮规划起算
+        reset_usage()  # 兼容入口（模块级基线供 usage_summary 展示）；熔断记账用下方 per-run 基线
+        self._usage_baseline = snapshot_usage()
         self.run_id = uuid.uuid4().hex
         # 新一轮规划边界：清空上一轮 run 作用域残留（§4.5 闭环后再次规划的场景）。
         # 成品/草稿必清（否则 has_draft 恒 true 会把新请求拖进草稿反馈语义）；
@@ -731,7 +743,7 @@ class TeamRunner:
             self._phase_started = asyncio.get_running_loop().time()
             hb = asyncio.create_task(self._heartbeat(phase))
             try:
-                check_budget()
+                check_budget(self._usage_baseline)
                 await self._run_phase(phase, changed_fields)
                 if phase == "collect":
                     # §3.8 检查点：阶段边界读黑板，比对版本号，变更影响分析 → 增量重跑
@@ -1138,7 +1150,7 @@ class TeamRunner:
         texts: list[str] = []
         stream = team.run_stream(task=task_text)
         while True:
-            check_budget()  # 逐轮检查：溢出幅度收敛到 ≤单轮（原只查阶段入口，实测超限 71% 才停）
+            check_budget(self._usage_baseline)  # 逐轮检查：溢出幅度收敛到 ≤单轮（原只查阶段入口，实测超限 71% 才停）
             try:
                 msg = await stream.__anext__()
             except StopAsyncIteration:

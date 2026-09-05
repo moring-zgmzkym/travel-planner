@@ -8,6 +8,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from pydantic import BaseModel, ValidationError
+
 from .models import ChangelogEntry, TravelProfile, WriterName
 
 logger = logging.getLogger("tripmate.blackboard")
@@ -15,6 +17,17 @@ logger = logging.getLogger("tripmate.blackboard")
 
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def coerced_field(model: BaseModel, key: str, value: Any) -> Any:
+    """按模型 schema 宽松校验/转型单字段，返回转型后的值；非法抛 ValidationError。
+
+    此前 apply_* 直接 setattr（pydantic 默认 validate_assignment=False）：LLM 传
+    {"days": "3天"} 会静默写入，延迟到下游纯逻辑处才炸 TypeError、整阶段报废。
+    现在写入口逐字段过 schema：pydantic 宽松模式放行 "3"→3、"6000"→6000.0 等
+    常规转型；带单位文本由 chatter 层预 coerce（blackboard 这里是最后防线）。"""
+    probe = type(model).model_validate({key: value})
+    return getattr(probe, key)
 
 
 class Blackboard:
@@ -104,16 +117,30 @@ class Blackboard:
         return version
 
     async def apply_basic_info(self, updates: dict[str, Any], writer: WriterName, reason: str) -> int:
-        """合并式更新 basic_info（逐字段记 changelog，供变更影响分析 §5.3）。"""
+        """合并式更新 basic_info（逐字段记 changelog，供变更影响分析 §5.3）。
+
+        两段式（2026-09-05）：先在 model_copy 上逐字段校验/转型收集可写字段，
+        全部通过后再统一落分区 + changelog + 版本号——非法字段跳过并记日志，
+        绝不让单字段类型错误造成"changelog 已追加而分区未写"的状态分裂。"""
         changed = False
         async with self._lock:
             basic = self._profile.basic_info.model_copy()
+            accepted: list[tuple[str, Any, Any]] = []
             for key, new_val in updates.items():
                 if not hasattr(basic, key):
+                    logger.warning("apply_basic_info 忽略未知字段 %r（writer=%s）", key, writer)
+                    continue
+                try:
+                    new_val = coerced_field(basic, key, new_val)
+                except (ValidationError, TypeError, ValueError) as e:
+                    logger.warning("apply_basic_info 拒绝字段 %r=%r（%s: %s）", key, new_val,
+                                   type(e).__name__, str(e)[:120])
                     continue
                 old_val = getattr(basic, key)
                 if old_val == new_val:
                     continue
+                accepted.append((key, old_val, new_val))
+            for key, old_val, new_val in accepted:
                 setattr(basic, key, new_val)
                 self._profile.changelog.append(
                     ChangelogEntry(
@@ -133,36 +160,51 @@ class Blackboard:
         return version
 
     async def apply_detail_info(self, updates: dict[str, Any], writer: WriterName, reason: str) -> int:
-        """合并式更新 detail_info（hotel 子对象同样逐字段记录）。"""
+        """合并式更新 detail_info（hotel 子对象同样逐字段记录；两段式校验同 apply_basic_info）。"""
         async with self._lock:
             detail = self._profile.detail_info.model_copy(deep=True)
-            changed = False
+            # (目标对象, setattr 属性名, changelog 字段名, 旧值, 新值)
+            accepted: list[tuple[Any, str, str, Any, Any]] = []
             for key, new_val in updates.items():
                 if key == "hotel" and isinstance(new_val, dict):
                     for hk, hv in new_val.items():
-                        if hasattr(detail.hotel, hk) and getattr(detail.hotel, hk) != hv:
-                            self._profile.changelog.append(
-                                ChangelogEntry(
-                                    time=_now(), version=self._profile.version + 1, writer=writer,
-                                    section="detail_info", field=f"hotel.{hk}",
-                                    old=_short(getattr(detail.hotel, hk)), new=_short(hv), reason=reason,
-                                )
-                            )
-                            setattr(detail.hotel, hk, hv)
-                            changed = True
+                        if not hasattr(detail.hotel, hk):
+                            logger.warning("apply_detail_info 忽略未知 hotel 字段 %r（writer=%s）", hk, writer)
+                            continue
+                        try:
+                            hv = coerced_field(detail.hotel, hk, hv)
+                        except (ValidationError, TypeError, ValueError) as e:
+                            logger.warning("apply_detail_info 拒绝 hotel.%s=%r（%s: %s）", hk, hv,
+                                           type(e).__name__, str(e)[:120])
+                            continue
+                        old_val = getattr(detail.hotel, hk)
+                        if old_val == hv:
+                            continue
+                        accepted.append((detail.hotel, hk, f"hotel.{hk}", old_val, hv))
                 elif hasattr(detail, key):
+                    try:
+                        new_val = coerced_field(detail, key, new_val)
+                    except (ValidationError, TypeError, ValueError) as e:
+                        logger.warning("apply_detail_info 拒绝字段 %r=%r（%s: %s）", key, new_val,
+                                       type(e).__name__, str(e)[:120])
+                        continue
                     old_val = getattr(detail, key)
                     if old_val == new_val:
                         continue
-                    setattr(detail, key, new_val)
-                    self._profile.changelog.append(
-                        ChangelogEntry(
-                            time=_now(), version=self._profile.version + 1, writer=writer,
-                            section="detail_info", field=key,
-                            old=_short(old_val), new=_short(new_val), reason=reason,
-                        )
+                    accepted.append((detail, key, key, old_val, new_val))
+                else:
+                    logger.warning("apply_detail_info 忽略未知字段 %r（writer=%s）", key, writer)
+            changed = False
+            for target, attr, field_name, old_val, new_val in accepted:
+                setattr(target, attr, new_val)
+                self._profile.changelog.append(
+                    ChangelogEntry(
+                        time=_now(), version=self._profile.version + 1, writer=writer,
+                        section="detail_info", field=field_name,
+                        old=_short(old_val), new=_short(new_val), reason=reason,
                     )
-                    changed = True
+                )
+                changed = True
             if changed:
                 self._profile.detail_info = detail
                 self._profile.version += 1

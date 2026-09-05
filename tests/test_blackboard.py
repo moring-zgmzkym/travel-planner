@@ -79,3 +79,22 @@ def test_changed_fields_party_size_and_days_impact():
     assert "party_size" in fields and "days" in fields
     affected = analyze_impact(fields)
     assert {"tickets", "hotels", "weather", "itinerary"} <= affected
+
+
+def test_apply_rejects_bad_type_but_applies_good_fields():
+    """两段式校验回归：单字段类型错误只跳过该字段并记日志，其余字段正常落盘，
+    绝不炸穿（此前 setattr 无校验，"3天"静默写入延迟到下游炸 TypeError）。"""
+    bb = Blackboard()
+    v = run(bb.apply_basic_info({"days": "3天", "origin": "上海"}, "chatter", "抽取"))
+    assert v == 1
+    assert bb.profile.basic_info.origin == "上海"
+    assert bb.profile.basic_info.days is None          # 坏字段未写入
+    assert [e.field for e in bb.profile.changelog if e.section == "basic_info"] == ["origin"]
+
+
+def test_apply_coerces_lax_numeric_strings():
+    """pydantic 宽松转型："3"→3、"6000"→6000.0 照常写入。"""
+    bb = Blackboard()
+    run(bb.apply_basic_info({"days": "3", "budget": "6000"}, "chatter", "抽取"))
+    assert bb.profile.basic_info.days == 3
+    assert bb.profile.basic_info.budget == 6000.0

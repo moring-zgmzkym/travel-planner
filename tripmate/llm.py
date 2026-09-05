@@ -295,28 +295,36 @@ def total_tokens() -> int:
 # 单次规划计数基线（2026-08-31）：熔断语义为"单次完整规划"（§2.3），而底层客户端计数器
 # 进程级累计且 OpenAIChatCompletionClient 未实现 reset_usage（实测 AttributeError）——
 # 以"起点快照 + 差值"实现按次记账：TeamRunner.start() 调 reset_usage() 重新锚定。
+# 2026-09-05：模块级基线是进程级单例，多会话并发时互相重锚/互相熔断——TeamRunner 改持
+# 每 run 基线并显式传入 check_budget；模块级基线仅保留给 usage_summary 展示与兼容。
 _usage_baseline = RequestUsage(prompt_tokens=0, completion_tokens=0)
 
 
 def reset_usage() -> None:
-    """重新锚定计数基线（TeamRunner.start 时调用），此后按差值记账本次规划消耗。"""
+    """重新锚定模块级计数基线（TeamRunner.start 时调用，兼容入口）。"""
     global _usage_baseline
-    _usage_baseline = (_client.total_usage() if _client is not None
-                       else RequestUsage(prompt_tokens=0, completion_tokens=0))
+    _usage_baseline = snapshot_usage()
 
 
-def _run_usage() -> RequestUsage:
-    """本次规划（自最近一次 reset_usage 起）的消耗 = 进程累计 − 基线。"""
-    u = _client.total_usage() if _client is not None else RequestUsage(
+def snapshot_usage() -> RequestUsage:
+    """当前进程累计消耗快照（per-run 基线取这里）。"""
+    return _client.total_usage() if _client is not None else RequestUsage(
         prompt_tokens=0, completion_tokens=0)
+
+
+def _run_usage(baseline: RequestUsage | None = None) -> RequestUsage:
+    """本次规划（自基线起）的消耗 = 进程累计 − 基线。baseline 为空回退模块级基线。"""
+    base = baseline if baseline is not None else _usage_baseline
+    u = snapshot_usage()
     return RequestUsage(
-        prompt_tokens=max(0, u.prompt_tokens - _usage_baseline.prompt_tokens),
-        completion_tokens=max(0, u.completion_tokens - _usage_baseline.completion_tokens),
+        prompt_tokens=max(0, u.prompt_tokens - base.prompt_tokens),
+        completion_tokens=max(0, u.completion_tokens - base.completion_tokens),
     )
 
 
-def check_budget() -> None:
-    u = _run_usage()
+def check_budget(baseline: RequestUsage | None = None) -> None:
+    """熔断检查：baseline 缺省回退模块级基线；TeamRunner 传每 run 基线实现多会话隔离。"""
+    u = _run_usage(baseline)
     used = u.prompt_tokens + u.completion_tokens
     if used > BudgetConfig.TOKEN_LIMIT:
         raise TokenBudgetExceeded(
@@ -324,10 +332,10 @@ def check_budget() -> None:
         )
 
 
-def usage_summary() -> dict:
+def usage_summary(baseline: RequestUsage | None = None) -> dict:
     if _client is None:
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "limit": BudgetConfig.TOKEN_LIMIT}
-    u = _run_usage()
+    u = _run_usage(baseline)
     return {
         "prompt_tokens": u.prompt_tokens,
         "completion_tokens": u.completion_tokens,

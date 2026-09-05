@@ -30,6 +30,55 @@ DEFAULTS: dict[str, tuple[object, str]] = {
 # 区域型目的地 → 代表性核心城市（仅精确匹配整词；宽泛词如"陕西"不自动替换，避免误判）
 REGION_ALIAS: dict[str, str] = {"陕南": "汉中", "陕西南部": "汉中", "陕南地区": "汉中"}
 
+_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _pre_coerce_field(key: str, value):
+    """LLM 脏输入的宽松转型（黑板 schema 校验前的第一道）：
+    "3天"→3、"6000元"→6000.0、"6000万"→60000000.0、"休闲"→["休闲"]、"300-500"→[300.0,500.0]。"""
+    if key in ("days", "party_size", "min_star") and isinstance(value, str):
+        m = _NUM_RE.search(value)
+        if m:
+            return int(float(m.group()))
+    if key in ("budget", "budget_max") and isinstance(value, str):
+        s = value.replace("，", "").replace(",", "").strip()
+        m = _NUM_RE.search(s)
+        if m:
+            return float(m.group()) * (10000.0 if "万" in s else 1.0)
+    if key in ("style", "must_visit", "food_restrictions") and isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if key == "travel_dates" and isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if key == "price_range" and isinstance(value, str):
+        nums = [float(x) for x in _NUM_RE.findall(value)]
+        if len(nums) >= 2:
+            return nums[:2]
+    return value
+
+
+def _validate_updates(model, updates: dict) -> tuple[dict, list[str]]:
+    """逐字段 schema 校验，返回（可写字段, 拒绝清单）——拒绝项随工具结果回传 LLM 自纠。"""
+    from pydantic import ValidationError
+
+    from .blackboard import coerced_field
+    accepted, rejected = {}, []
+    for key, val in updates.items():
+        if not hasattr(model, key):
+            rejected.append(f"{key}：不是可写字段")
+            continue
+        try:
+            accepted[key] = coerced_field(model, key, val)
+        except ValidationError as e:
+            rejected.append(f"{key}：{_err_msg(e)}")
+    return accepted, rejected
+
+
+def _err_msg(e) -> str:
+    try:
+        return str(e.errors()[0].get("msg", "类型不符"))
+    except Exception:  # noqa: BLE001
+        return "类型不符"
+
 
 def _reexpand_dates_after_days_change(basic_updates: dict, prof) -> None:
     """用户只改天数、未给新日期时，按既有出发日重展开逐日序列（就地写入 basic_updates）。
@@ -84,6 +133,13 @@ def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> Assista
             return json.dumps({"status": "error", "error": "参数必须是 JSON 对象"}, ensure_ascii=False)
 
         prof = bb.profile
+        # 第一道：LLM 脏输入宽松转型（"3天"→3 等）；hotel 嵌套键同样处理
+        basic_updates = {k: _pre_coerce_field(k, v) for k, v in basic_updates.items()}
+        detail_updates = {
+            k: ({hk: _pre_coerce_field(hk, hv) for hk, hv in v.items()}
+                if k == "hotel" and isinstance(v, dict) else _pre_coerce_field(k, v))
+            for k, v in detail_updates.items()
+        }
         # budget 联动：budget 更新而 budget_max 是旧预算推导值时同步重算
         new_budget = basic_updates.get("budget")
         if new_budget and prof.basic_info.budget and prof.basic_info.budget_max:
@@ -117,10 +173,13 @@ def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> Assista
             await bus.emit("Chatter", f"目的地「{dest}」按区域解析为代表城市「{resolved}」（可随时在对话中修改）",
                            "STATUS_INFO")
 
-        if basic_updates:
-            await bb.apply_basic_info(basic_updates, "chatter", "用户输入抽取")
-        if detail_updates:
-            await bb.apply_detail_info(detail_updates, "chatter", "用户输入抽取")
+        # 第二道：schema 校验——拒绝项随工具结果回传 LLM 自纠，可写字段才落黑板
+        basic_ok, basic_rej = _validate_updates(bb.profile.basic_info, basic_updates)
+        detail_ok, detail_rej = _validate_updates(bb.profile.detail_info, detail_updates)
+        if basic_ok:
+            await bb.apply_basic_info(basic_ok, "chatter", "用户输入抽取")
+        if detail_ok:
+            await bb.apply_detail_info(detail_ok, "chatter", "用户输入抽取")
 
         # 默认值补齐（仅当必填三要素齐备时；§2.1）
         basic = bb.profile.basic_info
@@ -139,8 +198,8 @@ def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> Assista
                 old_defaults = [d for d in bb.profile.basic_info.defaults_applied]
                 await bb.apply_basic_info({"defaults_applied": old_defaults + applied}, "chatter", "记录默认值")
                 await bus.emit("Chatter", "默认值补齐：" + "；".join(applied) + "（将在草稿中标注）", "STATUS_INFO")
-        # 用户后来给出真实值 → 从默认值标注中移除对应项
-        updated_keys = set(basic_updates) | set(detail_updates)
+        # 用户后来给出真实值 → 从默认值标注中移除对应项（仅计真正落写的字段）
+        updated_keys = set(basic_ok) | set(detail_ok)
         if updated_keys and bb.profile.basic_info.defaults_applied:
             remain = [d for d in bb.profile.basic_info.defaults_applied
                       if not any(k in d for k in updated_keys)]
@@ -149,7 +208,13 @@ def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> Assista
 
         # 中途修改：团队闲置待反馈时触发检查点（运行中由阶段边界检查点处理，§5.3）
         runner.on_profile_changed()
-        return _profile_view(bb)
+        result = _profile_view(bb)
+        rejected = basic_rej + detail_rej
+        if rejected:
+            data = json.loads(result)
+            data["rejected_fields"] = rejected
+            result = json.dumps(data, ensure_ascii=False)
+        return result
 
     async def get_travel_profile() -> str:
         """读取共享黑板当前画像，用于转述与判定。返回中含 draft_summary（逐日行程+预算+预警）、
