@@ -15,7 +15,7 @@ from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph,
 from ..models import TravelProfile
 from ..tools.weather import outfit_advice, weather_emoji
 from .base import (CONTENT_W, BaseTripTemplate, bold_font_name, day_photo,
-                   emoji_png, weekday)
+                   emoji_png, esc, weekday)
 
 
 class ClassicTemplate(BaseTripTemplate):
@@ -60,10 +60,10 @@ class ClassicTemplate(BaseTripTemplate):
         info_cells = []
         for row in overview_rows:
             info_cells.append([
-                Paragraph(row[0], st("ovk", 9, bold=True, color=self.PRIMARY)),
-                Paragraph(str(row[1]), st("ovv", 9)),
-                Paragraph(row[2], st("ovk2", 9, bold=True, color=self.PRIMARY)),
-                Paragraph(str(row[3]), st("ovv2", 9)),
+                Paragraph(esc(row[0]), st("ovk", 9, bold=True, color=self.PRIMARY)),
+                Paragraph(esc(row[1]), st("ovv", 9)),
+                Paragraph(esc(row[2]), st("ovk2", 9, bold=True, color=self.PRIMARY)),
+                Paragraph(esc(row[3]), st("ovv2", 9)),
             ])
         t = Table(info_cells, colWidths=[20 * mm, 69 * mm, 20 * mm, 69 * mm])
         t.setStyle(TableStyle([
@@ -79,7 +79,7 @@ class ClassicTemplate(BaseTripTemplate):
                 f"D{i + 1} {'→'.join(d.spots[:3]) or (d.morning or '')[:12]}"
                 for i, d in enumerate(profile.draft.days))
             story.append(Spacer(1, 4))
-            story.append(Paragraph(f"每日节奏：{rhythm_line}", st("rhythm", 9, color=self.GRAY)))
+            story.append(Paragraph(esc(f"每日节奏：{rhythm_line}"), st("rhythm", 9, color=self.GRAY)))
         story.append(Spacer(1, 7))
 
         # ---- 贰 天气与穿搭提醒（确定性规则表；无预报数据时整体隐藏）----
@@ -95,9 +95,9 @@ class ClassicTemplate(BaseTripTemplate):
                 advice = outfit_advice(day_text, d.get("temp_max"), d.get("temp_min"))
                 w_rows.append([
                     icon_cell,
-                    Paragraph(str(d.get("date", "")), st("wdate", 10.5, bold=True)),
-                    Paragraph(day_text, st("wtxt", 10.5)),
-                    Paragraph(f"{d.get('temp_min', '?')}~{d.get('temp_max', '?')}℃", st("wtemp", 10.5)),
+                    Paragraph(esc(d.get("date", "")), st("wdate", 10.5, bold=True)),
+                    Paragraph(esc(day_text), st("wtxt", 10.5)),
+                    Paragraph(esc(f"{d.get('temp_min', '?')}~{d.get('temp_max', '?')}℃"), st("wtemp", 10.5)),
                     Paragraph(escape(advice), st("wadv", 9.5, leading=14)),
                 ])
             wt = Table(w_rows, colWidths=[18 * mm, 27 * mm, 24 * mm, 27 * mm, CONTENT_W - 96 * mm])
@@ -111,7 +111,7 @@ class ClassicTemplate(BaseTripTemplate):
             ]))
             # 标题与表格绑定，避免章节头孤立在页底
             story.append(KeepTogether([self.section("贰", "天气与穿搭提醒"), Spacer(1, 4), wt]))
-            story.append(Paragraph(f"数据源：{profile.weather.get('source', '')}（预报窗约 16 天，出发前请再次确认）",
+            story.append(Paragraph(esc(f"数据源：{profile.weather.get('source', '')}（预报窗约 16 天，出发前请再次确认）"),
                                    st("wsrc", 8, color=self.GRAY, spaceBefore=3)))
             story.append(Spacer(1, 7))
 
@@ -119,18 +119,20 @@ class ClassicTemplate(BaseTripTemplate):
         hdr = lambda s: Paragraph(s, st("th", 9, bold=True, color=colors.white))  # noqa: E731
 
         def _link_cell(url: str, label: str) -> str:
-            """友好锚文本超链接：原始长 URL 会把 30mm 窄列按字符硬换行撑爆版面（2026-08-30 实测）。"""
-            return (f'<a href="{url}" color="{self.PRIMARY_HEX}"><u>{label}</u></a>' if url else "—")
+            """友好锚文本超链接：原始长 URL 会把 30mm 窄列按字符硬换行撑爆版面（2026-08-30 实测）。
+
+            url/label 均为外部文本，进属性位/锚文本前必须转义。"""
+            return (f'<a href="{esc(url)}" color="{self.PRIMARY_HEX}"><u>{esc(label)}</u></a>' if url else "—")
 
         order_rows = [[hdr("类型"), hdr("名称/班次"), hdr("关键信息"), hdr("推荐理由"), hdr("直达链接")]]
         for tk in profile.tickets:
-            reason = (f'<font face="{bold_font_name()}" color="{self.SUCCESS_HEX}">√ 已勾选</font>　' if tk.selected else "") + (tk.reason or "")
+            reason = (f'<font face="{bold_font_name()}" color="{self.SUCCESS_HEX}">√ 已勾选</font>　' if tk.selected else "") + esc(tk.reason or "")
             order_rows.append(["车票", tk.train_no,
                                f"{tk.depart_time} 出发 / {tk.arrive_time} 到达，{tk.price} 元",
                                Paragraph(reason, st("reason", 8.5)),
                                Paragraph(_link_cell(tk.link, "12306 购票"), st("linkcell", 8.5))])
         for h in profile.hotels:
-            reason = (f'<font face="{bold_font_name()}" color="{self.SUCCESS_HEX}">√ 已勾选</font>　' if h.selected else "") + (h.reason or "")
+            reason = (f'<font face="{bold_font_name()}" color="{self.SUCCESS_HEX}">√ 已勾选</font>　' if h.selected else "") + esc(h.reason or "")
             order_rows.append(["酒店", h.name,
                                f"{h.price_per_night:g} 元/晚，距地标 {h.distance_km:g}km，评分 {h.rating:g}",
                                Paragraph(reason, st("reason2", 8.5)),
@@ -147,7 +149,7 @@ class ClassicTemplate(BaseTripTemplate):
                                st("order_total", 10, spaceBefore=4, spaceAfter=2)))
         ref_notes = [x.source for x in (*profile.tickets, *profile.hotels) if x.reference_only]
         if ref_notes:
-            story.append(Paragraph("※ 数据来源说明：" + "；".join(sorted(set(ref_notes))),
+            story.append(Paragraph(esc("※ 数据来源说明：" + "；".join(sorted(set(ref_notes)))),
                                    st("refnote", 8.5, color=self.WARN, spaceAfter=4)))
         story.append(Spacer(1, 7))
 
@@ -160,11 +162,11 @@ class ClassicTemplate(BaseTripTemplate):
                 label = f"DAY {i + 1} · {day.date}" + (f" · {wk}" if wk else "")
                 body_rows = [
                     [Paragraph("上午", slot_st()),
-                     Paragraph(day.morning or "—", st("cell", 11, leading=17))],
+                     Paragraph(esc(day.morning or "—"), st("cell", 11, leading=17))],
                     [Paragraph("下午", slot_st()),
-                     Paragraph(day.afternoon or "—", st("cell", 11, leading=17))],
+                     Paragraph(esc(day.afternoon or "—"), st("cell", 11, leading=17))],
                     [Paragraph("晚上", slot_st()),
-                     Paragraph(day.evening or "—", st("cell", 11, leading=17))],
+                     Paragraph(esc(day.evening or "—"), st("cell", 11, leading=17))],
                 ]
                 # 一天=一张表：照片头条作为跨列首行并入（2026-09-03 修复：此前照片与行程表
                 # 是两个独立 Flowable，分页/拼接会错位），顺序天然正确、永不分离
@@ -184,7 +186,7 @@ class ClassicTemplate(BaseTripTemplate):
                              ("LEFTPADDING", (0, 0), (-1, 0), 0), ("RIGHTPADDING", (0, 0), (-1, 0), 0),
                              ("TOPPADDING", (0, 0), (-1, 0), 0), ("BOTTOMPADDING", (0, 0), (-1, 0), 0)]
                 else:
-                    rows = [[Paragraph(label, st("day", 13, bold=True, color=colors.white)), ""]] + body_rows
+                    rows = [[Paragraph(esc(label), st("day", 13, bold=True, color=colors.white)), ""]] + body_rows
                     cmds += [("SPAN", (0, 0), (1, 0)),
                              ("BACKGROUND", (0, 0), (1, 0), self.PRIMARY)]
                 t = Table(rows, colWidths=[20 * mm, CONTENT_W - 20 * mm])
@@ -228,7 +230,7 @@ class ClassicTemplate(BaseTripTemplate):
                           st("barcap", 8, color=self.GRAY, spaceBefore=2)),
             ]))
         for w in budget["warnings"]:
-            story.append(Paragraph("※ " + w, st("bwarn", 9.5, color=self.WARN, spaceBefore=3)))
+            story.append(Paragraph(esc("※ " + w), st("bwarn", 9.5, color=self.WARN, spaceBefore=3)))
         story.append(Spacer(1, 7))
 
         # ---- 陆 实景速览（图注：简介 + 游玩建议，不再展示图片来源）----
@@ -285,11 +287,11 @@ class ClassicTemplate(BaseTripTemplate):
                 badge = ('<font face="{}" color="{}">√ 已勾选</font>'.format(bold_font_name(), self.SUCCESS_HEX)
                          if h.selected else '<font color="#6b7280">备选 {}</font>'.format(rank))
                 right_cells = [
-                    [Paragraph(h.name, st("hname", 12, bold=True))],
+                    [Paragraph(esc(h.name), st("hname", 12, bold=True))],
                     [Paragraph(f"★ {h.rating:g}｜{h.price_per_night:g} 元/晚｜距地标 {h.distance_km:g}km　{badge}",
                                st("hmeta", 9.5))],
-                    [Paragraph(f"网络评价：{h.review_digest}" if h.review_digest
-                               else f"推荐理由：{h.reason or '综合评分靠前'}",
+                    [Paragraph(esc(f"网络评价：{h.review_digest}") if h.review_digest
+                               else esc(f"推荐理由：{h.reason or '综合评分靠前'}"),
                                st("hreview", 9, color=self.GRAY, leading=13))],
                 ]
                 card = Table([[left_cells, right_cells]], colWidths=[64 * mm, CONTENT_W - 64 * mm])
@@ -351,7 +353,7 @@ class ClassicTemplate(BaseTripTemplate):
                 titles = list(dict.fromkeys(titles))[:5]
                 foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
                     else "暂无（攻略通道未返回）"
-                food_flow.append(Paragraph(foods_text, st("foods", 10)))
+                food_flow.append(Paragraph(esc(foods_text), st("foods", 10)))
         if food_flow:
             # 标题与首块绑定，避免章节头孤立在页底
             story.append(KeepTogether([self.section("捌", "美食推荐与注意事项"), Spacer(1, 4), food_flow[0]]))
@@ -364,7 +366,7 @@ class ClassicTemplate(BaseTripTemplate):
         seen_w: set[str] = set()
         warn_items = [x for x in warns if not (x in seen_w or seen_w.add(x))][:8]
         if warn_items:
-            warn_rows = [[Paragraph("• " + w, st("warn_item", 9.5))] for w in warn_items]
+            warn_rows = [[Paragraph(esc("• " + w), st("warn_item", 9.5))] for w in warn_items]
             wt = Table(warn_rows, colWidths=[CONTENT_W])
             wt.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, -1), self.BG_LIGHT),
@@ -373,7 +375,7 @@ class ClassicTemplate(BaseTripTemplate):
             ]))
             story.append(wt)
         for i, g in enumerate(profile.guide_digest[:3]):
-            story.append(Paragraph(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）",
+            story.append(Paragraph(esc(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）"),
                                    st("src", 8, color=self.GRAY, spaceBefore=3)))
         if basic.defaults_applied:
             story.append(Paragraph("默认值说明：以下字段由系统按默认值补齐——" + "、".join(basic.defaults_applied),

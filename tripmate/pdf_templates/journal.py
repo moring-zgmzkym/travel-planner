@@ -24,7 +24,8 @@ from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph,
                                 Spacer, Table, TableStyle)
 
 from ..models import TravelProfile
-from .base import (CONTENT_W, CROP_DIR, BaseTripTemplate, bold_font_name,
+from .base import (
+    esc,CONTENT_W, CROP_DIR, BaseTripTemplate, bold_font_name,
                    crop_ratio, day_photo, pil_font, weekday)
 
 _DASH = 1  # reportlab 线命令 cap 参数（平头），其后跟 dash 数组
@@ -113,7 +114,7 @@ class JournalTemplate(BaseTripTemplate):
                 st = self.style(f"jtc{i}-{j}", font_size)
                 if j in right_cols:
                     st.alignment = 2  # TA_RIGHT
-                cells.append(Paragraph(str(c), st))
+                cells.append(Paragraph(esc(c), st))
             body.append(cells)
         t = Table(body, colWidths=widths, repeatRows=1)
         t.setStyle(TableStyle([
@@ -184,7 +185,7 @@ class JournalTemplate(BaseTripTemplate):
             return self.image_cell(spot, path, source)
         src = source if len(source) <= 96 else source[:93] + "..."
         cells = [[img],
-                 [Paragraph(f"来源：{src}", self.style("jpolsrc", 7.5, color=self.GRAY,
+                 [Paragraph(esc(f"来源：{src}"), self.style("jpolsrc", 7.5, color=self.GRAY,
                                                        leading=10, alignment=TA_CENTER))]]
         t = Table(cells, colWidths=[85 * mm])
         t.setStyle(TableStyle([
@@ -200,9 +201,9 @@ class JournalTemplate(BaseTripTemplate):
         label = f"DAY {i + 1} · {day.date}" + (f" · {wk}" if wk else "")
         slot_st = self.style("jslot", 9, bold=True, color=self.ACCENT)
         body_rows = [
-            [Paragraph("上午", slot_st), Paragraph(day.morning or "—", self.style("jdm", 9.5))],
-            [Paragraph("下午", slot_st), Paragraph(day.afternoon or "—", self.style("jda", 9.5))],
-            [Paragraph("晚上", slot_st), Paragraph(day.evening or "—", self.style("jde", 9.5))],
+            [Paragraph("上午", slot_st), Paragraph(esc(day.morning or "—"), self.style("jdm", 9.5))],
+            [Paragraph("下午", slot_st), Paragraph(esc(day.afternoon or "—"), self.style("jda", 9.5))],
+            [Paragraph("晚上", slot_st), Paragraph(esc(day.evening or "—"), self.style("jde", 9.5))],
         ]
         mini_w = 33 * mm
         photo = day_photo(day, profile)
@@ -216,7 +217,7 @@ class JournalTemplate(BaseTripTemplate):
             except Exception:  # noqa: BLE001 — 拍立得失败则纯文字卡
                 right = None
         inner_w = CONTENT_W - mini_w - 2 * mm if right else CONTENT_W
-        body = Table([[Paragraph(label, self.style("jday", 10.5, bold=True, color=colors.white)), ""]]
+        body = Table([[Paragraph(esc(label), self.style("jday", 10.5, bold=True, color=colors.white)), ""]]
                      + body_rows, colWidths=[18 * mm, inner_w - 18 * mm])
         body.setStyle(TableStyle([
             ("SPAN", (0, 0), (1, 0)),
@@ -278,9 +279,9 @@ class JournalTemplate(BaseTripTemplate):
         for row in overview_rows:
             info_cells.append([
                 Paragraph(row[0], st("jk1", 9, bold=True, color=self.PRIMARY)),
-                Paragraph(str(row[1]), st("jv1", 9)),
+                Paragraph(esc(row[1]), st("jv1", 9)),
                 Paragraph(row[2], st("jk2", 9, bold=True, color=self.PRIMARY)),
-                Paragraph(str(row[3]), st("jv2", 9)),
+                Paragraph(esc(row[3]), st("jv2", 9)),
             ])
         t = Table(info_cells, colWidths=[20 * mm, 69 * mm, 20 * mm, 69 * mm])
         t.setStyle(TableStyle([
@@ -301,7 +302,7 @@ class JournalTemplate(BaseTripTemplate):
                 f"D{i + 1} {'→'.join(d.spots[:3]) or (d.morning or '')[:12]}"
                 for i, d in enumerate(profile.draft.days))
             story.append(Spacer(1, 4))
-            story.append(Paragraph(f"每日节奏：{rhythm_line}", st("jrhythm", 9, color=self.GRAY)))
+            story.append(Paragraph(esc(f"每日节奏：{rhythm_line}"), st("jrhythm", 9, color=self.GRAY)))
         story.append(Spacer(1, 7))
 
         # ---- 贰 推荐订单清单 ----
@@ -310,17 +311,17 @@ class JournalTemplate(BaseTripTemplate):
 
         def _link_cell(url: str, label: str) -> str:
             """友好锚文本超链接：原始长 URL 会把窄列按字符硬换行撑爆版面。"""
-            return (f'<a href="{url}" color="{self.PRIMARY_HEX}"><u>{label}</u></a>' if url else "—")
+            return (f'<a href="{esc(url)}" color="{self.PRIMARY_HEX}"><u>{esc(label)}</u></a>' if url else "—")
 
         order_rows = [[hdr("类型"), hdr("名称/班次"), hdr("关键信息"), hdr("推荐理由"), hdr("直达链接")]]
         for tk in profile.tickets:
-            reason = (f'<font face="{bold_font_name()}" color="{self.SUCCESS_HEX}">√ 已勾选</font>　' if tk.selected else "") + (tk.reason or "")
+            reason = (f'<font face="{bold_font_name()}" color="{self.SUCCESS_HEX}">√ 已勾选</font>　' if tk.selected else "") + esc(tk.reason or "")
             order_rows.append(["车票", tk.train_no,
                                f"{tk.depart_time} 出发 / {tk.arrive_time} 到达，{tk.price} 元",
                                Paragraph(reason, st("jreason", 8.5)),
                                Paragraph(_link_cell(tk.link, "12306 购票"), st("jlink", 8.5))])
         for h in profile.hotels:
-            reason = (f'<font face="{bold_font_name()}" color="{self.SUCCESS_HEX}">√ 已勾选</font>　' if h.selected else "") + (h.reason or "")
+            reason = (f'<font face="{bold_font_name()}" color="{self.SUCCESS_HEX}">√ 已勾选</font>　' if h.selected else "") + esc(h.reason or "")
             order_rows.append(["酒店", h.name,
                                f"{h.price_per_night:g} 元/晚，距地标 {h.distance_km:g}km，评分 {h.rating:g}",
                                Paragraph(reason, st("jreason2", 8.5)),
@@ -334,7 +335,7 @@ class JournalTemplate(BaseTripTemplate):
                                st("jordtot", 10, spaceBefore=4, spaceAfter=2)))
         ref_notes = [x.source for x in (*profile.tickets, *profile.hotels) if x.reference_only]
         if ref_notes:
-            story.append(Paragraph("※ 数据来源说明：" + "；".join(sorted(set(ref_notes))),
+            story.append(Paragraph(esc("※ 数据来源说明：" + "；".join(sorted(set(ref_notes)))),
                                    st("jrefnote", 8.5, color=self.WARN, spaceAfter=4)))
         story.append(Spacer(1, 7))
 
@@ -372,7 +373,7 @@ class JournalTemplate(BaseTripTemplate):
                           st("jbarcap", 8, color=self.GRAY, spaceBefore=2)),
             ]))
         for w in budget["warnings"]:
-            story.append(Paragraph("※ " + w, st("jbwarn", 9.5, color=self.WARN, spaceBefore=3)))
+            story.append(Paragraph(esc("※ " + w), st("jbwarn", 9.5, color=self.WARN, spaceBefore=3)))
         story.append(Spacer(1, 7))
 
         # ---- 伍 实景速览（拍立得墙：黄 / 粉胶带交替）----
@@ -414,11 +415,11 @@ class JournalTemplate(BaseTripTemplate):
                 left.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"),
                                           ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
                 right_cells = [
-                    [Paragraph(h.name, st("jhname", 11, bold=True, color=self.PRIMARY))],
+                    [Paragraph(esc(h.name), st("jhname", 11, bold=True, color=self.PRIMARY))],
                     [Paragraph(f"★ {h.rating:g}｜{h.price_per_night:g} 元/晚｜距地标 {h.distance_km:g}km"
                                + ("　<font face=\"{}\" color=\"{}\">√ 已勾选</font>".format(bold_font_name(), self.SUCCESS_HEX)
                                   if h.selected else ""), st("jhmeta", 9))],
-                    [Paragraph(f"网络评价：{h.review_digest}" if h.review_digest else "网络评价：暂无",
+                    [Paragraph(esc(f"网络评价：{h.review_digest}") if h.review_digest else "网络评价：暂无",
                                st("jhrev", 8.5, color=self.GRAY, leading=12))],
                 ]
                 card = Table([[left, right_cells]], colWidths=[60 * mm, CONTENT_W - 60 * mm])
@@ -452,7 +453,7 @@ class JournalTemplate(BaseTripTemplate):
             titles = list(dict.fromkeys(titles))[:5]
             foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
                 else "暂无（攻略通道未返回）"
-            story.append(Paragraph(foods_text, st("jfoods", 10)))
+            story.append(Paragraph(esc(foods_text), st("jfoods", 10)))
         story.append(Spacer(1, 6))
 
         warns: list[str] = []
@@ -461,7 +462,7 @@ class JournalTemplate(BaseTripTemplate):
         seen_w: set[str] = set()
         warn_items = [x for x in warns if not (x in seen_w or seen_w.add(x))][:8]
         if warn_items:
-            warn_rows = [[Paragraph("• " + w, st("jwarnitem", 9.5))] for w in warn_items]
+            warn_rows = [[Paragraph(esc("• " + w), st("jwarnitem", 9.5))] for w in warn_items]
             wt = Table(warn_rows, colWidths=[CONTENT_W])
             wt.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, -1), self.CARD),
@@ -472,7 +473,7 @@ class JournalTemplate(BaseTripTemplate):
             ]))
             story.append(wt)
         for i, g in enumerate(profile.guide_digest[:3]):
-            story.append(Paragraph(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）",
+            story.append(Paragraph(esc(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）"),
                                    st("jsrc", 8, color=self.GRAY, spaceBefore=3)))
         if profile.weather.get("days"):
             wline = "；".join(f"{d['date']} {d['day_text']} {d.get('temp_min', '?')}~{d.get('temp_max', '?')}℃"

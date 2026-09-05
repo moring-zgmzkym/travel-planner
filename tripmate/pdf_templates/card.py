@@ -17,7 +17,7 @@ from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph,
                                 Spacer, Table, TableStyle)
 
 from ..models import TravelProfile
-from .base import CONTENT_W, BaseTripTemplate, bold_font_name, day_photo, weekday
+from .base import CONTENT_W, BaseTripTemplate, bold_font_name, day_photo, esc, weekday
 
 
 class CardTemplate(BaseTripTemplate):
@@ -68,7 +68,7 @@ class CardTemplate(BaseTripTemplate):
 
         def mini_card(label: str, value: str) -> Table:
             t = Table([[Paragraph(label, st("mcl", 8, color=self.GRAY, leading=11))],
-                       [Paragraph(str(value), st("mcv", 9.5, bold=True, leading=13))]],
+                       [Paragraph(esc(value), st("mcv", 9.5, bold=True, leading=13))]],
                       colWidths=[CONTENT_W / 4 - 5 * mm])
             t.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, -1), self.BG_LIGHT),
@@ -92,9 +92,9 @@ class CardTemplate(BaseTripTemplate):
             ("LEFTPADDING", (0, 0), (-1, -1), 1), ("RIGHTPADDING", (0, 0), (-1, -1), 1),
         ]))
         wide = Table([[Paragraph("酒店偏好", st("wk", 8, color=self.GRAY)),
-                       Paragraph(hotel_pref, st("wv", 9.5)),
+                       Paragraph(esc(hotel_pref), st("wv", 9.5)),
                        Paragraph("必去景点", st("wk2", 8, color=self.GRAY)),
-                       Paragraph(must, st("wv2", 9.5))]],
+                       Paragraph(esc(must), st("wv2", 9.5))]],
                      colWidths=[20 * mm, CONTENT_W / 2 - 20 * mm, 20 * mm, CONTENT_W / 2 - 20 * mm])
         wide.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), self.BG_LIGHT),
@@ -109,7 +109,7 @@ class CardTemplate(BaseTripTemplate):
                 f"D{i + 1} {'→'.join(d.spots[:3]) or (d.morning or '')[:12]}"
                 for i, d in enumerate(profile.draft.days))
             ov_block += [Spacer(1, 4),
-                         Paragraph(f"每日节奏：{rhythm_line}", st("rhythm", 9, color=self.GRAY))]
+                         Paragraph(esc(f"每日节奏：{rhythm_line}"), st("rhythm", 9, color=self.GRAY))]
         story.append(KeepTogether(ov_block))
         story.append(Spacer(1, 7))
 
@@ -118,8 +118,10 @@ class CardTemplate(BaseTripTemplate):
         story.append(Spacer(1, 4))
 
         def _link_cell(url: str, label: str) -> str:
-            """友好锚文本超链接：原始长 URL 会把窄列按字符硬换行撑爆版面。"""
-            return (f'<a href="{url}" color="{self.PRIMARY_HEX}"><u>{label}</u></a>' if url else "—")
+            """友好锚文本超链接：原始长 URL 会把窄列按字符硬换行撑爆版面。
+
+            url/label 均为外部文本，进属性位/锚文本前必须转义（& 会炸 paraparser）。"""
+            return (f'<a href="{esc(url)}" color="{self.PRIMARY_HEX}"><u>{esc(label)}</u></a>' if url else "—")
 
         def _cat_chip(text: str, color) -> Table:
             t = Table([[Paragraph(text, st("chip", 8.5, bold=True, color=colors.white,
@@ -134,8 +136,8 @@ class CardTemplate(BaseTripTemplate):
                         reason_html: str, link_html: str) -> Table:
             t = Table([[
                 Paragraph(kind, st("obadge", 8.5, bold=True, color=colors.white, alignment=TA_CENTER)),
-                [Paragraph(title, st("otitle", 9.5, bold=True)),
-                 Paragraph(info, st("oinfo", 8.5, color=self.GRAY, leading=12))],
+                [Paragraph(esc(title), st("otitle", 9.5, bold=True)),
+                 Paragraph(esc(info), st("oinfo", 8.5, color=self.GRAY, leading=12))],
                 Paragraph(reason_html, st("oreason", 8.5)),
                 Paragraph(link_html, st("olink", 8.5)),
             ]], colWidths=[13 * mm, 57 * mm, 72 * mm, 36 * mm])
@@ -163,7 +165,7 @@ class CardTemplate(BaseTripTemplate):
 
         ticket_cards = []
         for tk in profile.tickets:
-            reason = (checked if tk.selected else "") + (tk.reason or "")
+            reason = (checked if tk.selected else "") + esc(tk.reason or "")
             ticket_cards.append((_order_card(
                 "车票", self.PRIMARY, tk.train_no,
                 f"{tk.depart_time} 出发 / {tk.arrive_time} 到达，{tk.price} 元",
@@ -171,7 +173,7 @@ class CardTemplate(BaseTripTemplate):
         emit_category("车票", self.PRIMARY, ticket_cards)
         hotel_cards = []
         for h in profile.hotels:
-            reason = (checked if h.selected else "") + (h.reason or "")
+            reason = (checked if h.selected else "") + esc(h.reason or "")
             hotel_cards.append((_order_card(
                 "酒店", self.ACCENT, h.name,
                 f"{h.price_per_night:g} 元/晚，距地标 {h.distance_km:g}km，评分 {h.rating:g}",
@@ -196,7 +198,7 @@ class CardTemplate(BaseTripTemplate):
         story.append(tot_card)
         ref_notes = [x.source for x in (*profile.tickets, *profile.hotels) if x.reference_only]
         if ref_notes:
-            story.append(Paragraph("※ 数据来源说明：" + "；".join(sorted(set(ref_notes))),
+            story.append(Paragraph(esc("※ 数据来源说明：" + "；".join(sorted(set(ref_notes)))),
                                    st("refnote", 8.5, color=self.WARN, spaceAfter=4)))
         story.append(Spacer(1, 7))
 
@@ -211,9 +213,9 @@ class CardTemplate(BaseTripTemplate):
                 wk = weekday(day.date, basic.travel_dates)
                 label = f"DAY {i + 1} · {day.date}" + (f" · {wk}" if wk else "")
                 body_rows = [
-                    [Paragraph("上午", slot_st()), Paragraph(day.morning or "—", st("cell", 9.5))],
-                    [Paragraph("下午", slot_st()), Paragraph(day.afternoon or "—", st("cell", 9.5))],
-                    [Paragraph("晚上", slot_st()), Paragraph(day.evening or "—", st("cell", 9.5))],
+                    [Paragraph("上午", slot_st()), Paragraph(esc(day.morning or "—"), st("cell", 9.5))],
+                    [Paragraph("下午", slot_st()), Paragraph(esc(day.afternoon or "—"), st("cell", 9.5))],
+                    [Paragraph("晚上", slot_st()), Paragraph(esc(day.evening or "—"), st("cell", 9.5))],
                 ]
                 strip_path = ""
                 photo = day_photo(day, profile)
@@ -223,7 +225,7 @@ class CardTemplate(BaseTripTemplate):
                     head_row = [Image(strip_path, width=CONTENT_W,
                                       height=CONTENT_W * 185 / 1100), ""]
                 else:
-                    head_row = [Paragraph(label, st("dayhdr", 11, bold=True, color=colors.white)), ""]
+                    head_row = [Paragraph(esc(label), st("dayhdr", 11, bold=True, color=colors.white)), ""]
                 t = Table([head_row] + body_rows, colWidths=[18 * mm, CONTENT_W - 18 * mm])
                 cmds = [
                     ("SPAN", (0, 0), (1, 0)),
@@ -279,7 +281,7 @@ class CardTemplate(BaseTripTemplate):
                           st("barcap", 8, color=self.GRAY, spaceBefore=2)),
             ]))
         for w in budget["warnings"]:
-            story.append(Paragraph("※ " + w, st("bwarn", 9.5, color=self.WARN, spaceBefore=3)))
+            story.append(Paragraph(esc("※ " + w), st("bwarn", 9.5, color=self.WARN, spaceBefore=3)))
         story.append(Spacer(1, 7))
 
         # ---- 伍 实景速览（复用基类图片卡；缺图自动降级文字卡）----
@@ -315,11 +317,11 @@ class CardTemplate(BaseTripTemplate):
                 else:
                     left_cells.append([Paragraph("酒店图片暂缺", st("noimg2", 9, color=self.GRAY))])
                 right_cells = [
-                    [Paragraph(h.name, st("hname", 11, bold=True, color=self.PRIMARY))],
+                    [Paragraph(esc(h.name), st("hname", 11, bold=True, color=self.PRIMARY))],
                     [Paragraph(f"★ {h.rating:g}｜{h.price_per_night:g} 元/晚｜距地标 {h.distance_km:g}km"
                                + ("　<font face=\"{}\" color=\"{}\">√ 已勾选</font>".format(bold_font_name(), self.SUCCESS_HEX)
                                   if h.selected else ""), st("hmeta", 9))],
-                    [Paragraph(f"网络评价：{h.review_digest}" if h.review_digest else "网络评价：暂无",
+                    [Paragraph(esc(f"网络评价：{h.review_digest}") if h.review_digest else "网络评价：暂无",
                                st("hreview", 8.5, color=self.GRAY, leading=12))],
                 ]
                 card = Table([[left_cells, right_cells]], colWidths=[64 * mm, CONTENT_W - 64 * mm])
@@ -355,7 +357,7 @@ class CardTemplate(BaseTripTemplate):
             titles = list(dict.fromkeys(titles))[:5]
             foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
                 else "暂无（攻略通道未返回）"
-            story.append(Paragraph(foods_text, st("foods", 10)))
+            story.append(Paragraph(esc(foods_text), st("foods", 10)))
         story.append(Spacer(1, 6))
 
         warns: list[str] = []
@@ -364,7 +366,7 @@ class CardTemplate(BaseTripTemplate):
         seen_w: set[str] = set()
         warn_items = [x for x in warns if not (x in seen_w or seen_w.add(x))][:8]
         if warn_items:
-            warn_rows = [["", Paragraph("• " + w, st("warn_item", 9.5))] for w in warn_items]
+            warn_rows = [["", Paragraph(esc("• " + w), st("warn_item", 9.5))] for w in warn_items]
             wt = Table(warn_rows, colWidths=[1.8 * mm, CONTENT_W - 1.8 * mm])
             wt.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (0, -1), self.ACCENT),
@@ -375,12 +377,12 @@ class CardTemplate(BaseTripTemplate):
             ]))
             story.append(wt)
         for i, g in enumerate(profile.guide_digest[:3]):
-            story.append(Paragraph(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）",
+            story.append(Paragraph(esc(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）"),
                                    st("src", 8, color=self.GRAY, spaceBefore=3)))
         if profile.weather.get("days"):
             wline = "；".join(f"{d['date']} {d['day_text']} {d.get('temp_min', '?')}~{d.get('temp_max', '?')}℃"
                              for d in profile.weather["days"])
-            story.append(Paragraph(f"天气参考（{profile.weather.get('source', '')}）：{wline}",
+            story.append(Paragraph(esc(f"天气参考（{profile.weather.get('source', '')}）：{wline}"),
                                    st("src2", 8, color=self.GRAY, spaceBefore=3)))
         if basic.defaults_applied:
             story.append(Paragraph("默认值说明：以下字段由系统按默认值补齐——" + "、".join(basic.defaults_applied),

@@ -25,7 +25,8 @@ from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph,
                                 Spacer, Table, TableStyle)
 
 from ..models import TravelProfile
-from .base import (CONTENT_W, CROP_DIR, BaseTripTemplate, bold_font_name,
+from .base import (
+    esc,CONTENT_W, CROP_DIR, BaseTripTemplate, bold_font_name,
                    crop_ratio, day_photo, draw_center, pil_font, weekday)
 
 GOLD_HEX = "#c9a05a"          # 金（大字号/描边/圆点）
@@ -365,10 +366,10 @@ class GuideTemplate(BaseTripTemplate):
             p = self.crop_43(path)
             cells.append([Image(p, width=76 * mm, height=76 * mm * 3 / 4)])
         except Exception:  # noqa: BLE001 — 图片缺失降级为文字卡
-            cells.append([Paragraph(f"【{spot}】图片暂缺", st("gnoimg", 9, color=self.GRAY))])
-        cells.append([Paragraph(spot, st("gspot", 10, bold=True, color=self.ACCENT))])
+            cells.append([Paragraph(esc(f"【{spot}】图片暂缺"), st("gnoimg", 9, color=self.GRAY))])
+        cells.append([Paragraph(esc(spot), st("gspot", 10, bold=True, color=self.ACCENT))])
         src = source if len(source) <= 80 else source[:77] + "..."
-        cells.append([Paragraph(f"来源：{src}", st("gsrc", 7.5, color=self.GRAY, leading=10))])
+        cells.append([Paragraph(esc(f"来源：{src}"), st("gsrc", 7.5, color=self.GRAY, leading=10))])
         t = Table(cells, colWidths=[84 * mm])
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), self.CARD),
@@ -389,7 +390,7 @@ class GuideTemplate(BaseTripTemplate):
         wk = weekday(day.date, basic.travel_dates)
         label = f"DAY {i + 1} · {day.date}" + (f" · {wk}" if wk else "")
         flow: list = []
-        bar = Table([[Paragraph(label, st("gday", 11.5, bold=True, color=self.PRIMARY))]],
+        bar = Table([[Paragraph(esc(label), st("gday", 11.5, bold=True, color=self.PRIMARY))]],
                     colWidths=[CONTENT_W])
         bar.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), self.ACCENT),
@@ -409,7 +410,7 @@ class GuideTemplate(BaseTripTemplate):
         for slot, text in (("上午", day.morning), ("下午", day.afternoon), ("晚上", day.evening)):
             content = (f'<font face="{bold_font_name()}" color="{GOLD_DEEP_HEX}">{slot}</font>'
                        f'<font color="{GOLD_DEEP_HEX}">　</font>{text or "—"}')
-            rows.append([Paragraph("●", dot_style), Paragraph(content, st(f"gd{slot}", 9.5, leading=14))])
+            rows.append([Paragraph("●", dot_style), Paragraph(esc(content), st(f"gd{slot}", 9.5, leading=14))])
         t = Table(rows, colWidths=[7 * mm, CONTENT_W - 7 * mm])
         t.setStyle(TableStyle([
             ("VALIGN", (0, 0), (0, -1), "TOP"),
@@ -435,11 +436,11 @@ class GuideTemplate(BaseTripTemplate):
         badge_color = colors.white if kind == "车票" else self.PRIMARY
         badge = Paragraph(badge_txt, st(f"ob{kind}", 9.5, bold=True, color=badge_color,
                                         alignment=TA_CENTER, leading=13))
-        mid = [Paragraph(name, st(f"on{name[:6]}", 10.5, bold=True, color=self.PRIMARY, leading=15)),
-               Paragraph(info, st(f"oi{name[:6]}", 8.3, color=self.GRAY, leading=12))]
+        mid = [Paragraph(esc(name), st(f"on{esc(name)[:6]}", 10.5, bold=True, color=self.PRIMARY, leading=15)),
+               Paragraph(esc(info), st(f"oi{esc(name)[:6]}", 8.3, color=self.GRAY, leading=12))]
         tag = (f'<font face="{bold_font_name()}" color="{GOLD_DEEP_HEX}">√ 已勾选</font>　'
                if selected else "")
-        right = [Paragraph(tag + (reason or "—"), st(f"or{name[:6]}", 8.5, leading=12.5)),
+        right = [Paragraph(tag + esc(reason or "—"), st(f"or{esc(name)[:6]}", 8.5, leading=12.5)),
                  Paragraph(link_html, st(f"ol{name[:6]}", 8.5, leading=12.5))]
         t = Table([[badge, mid, right]], colWidths=[15 * mm, 68 * mm, CONTENT_W - 83 * mm])
         t.setStyle(TableStyle([
@@ -472,10 +473,10 @@ class GuideTemplate(BaseTripTemplate):
                 + (f'　<font face="{bold_font_name()}" color="{GOLD_DEEP_HEX}">√ 已勾选</font>'
                    if h.selected else ""))
         right = [
-            [Paragraph(h.name, st(f"ghn{h.name[:5]}", 12, bold=True, color=self.PRIMARY, leading=16))],
+            [Paragraph(esc(h.name), st(f"ghn{esc(h.name)[:5]}", 12, bold=True, color=self.PRIMARY, leading=16))],
             [Paragraph(meta, st(f"ghm{h.name[:5]}", 9, leading=13))],
-            [Paragraph(f"网络评价：{h.review_digest}" if h.review_digest else "网络评价：暂无",
-                       st(f"ghr{h.name[:5]}", 8.5, color=self.GRAY, leading=12))],
+            [Paragraph(esc(f"网络评价：{h.review_digest}") if h.review_digest else "网络评价：暂无",
+                       st(f"ghr{esc(h.name)[:5]}", 8.5, color=self.GRAY, leading=12))],
         ]
         card = Table([[left, right]], colWidths=[64 * mm, CONTENT_W - 64 * mm])
         card.setStyle(TableStyle([
@@ -529,10 +530,10 @@ class GuideTemplate(BaseTripTemplate):
         info_cells = []
         for row in overview_rows:
             info_cells.append([
-                Paragraph(row[0], st("gk1", 9, bold=True, color=self.ACCENT)),
-                Paragraph(str(row[1]), st("gv1", 9)),
-                Paragraph(row[2], st("gk2", 9, bold=True, color=self.ACCENT)),
-                Paragraph(str(row[3]), st("gv2", 9)),
+                Paragraph(esc(row[0]), st("gk1", 9, bold=True, color=self.ACCENT)),
+                Paragraph(esc(row[1]), st("gv1", 9)),
+                Paragraph(esc(row[2]), st("gk2", 9, bold=True, color=self.ACCENT)),
+                Paragraph(esc(row[3]), st("gv2", 9)),
             ])
         t = Table(info_cells, colWidths=[20 * mm, 69 * mm, 20 * mm, 69 * mm])
         t.setStyle(TableStyle([
@@ -547,7 +548,7 @@ class GuideTemplate(BaseTripTemplate):
                 f"D{i + 1} {'→'.join(d.spots[:3]) or (d.morning or '')[:12]}"
                 for i, d in enumerate(profile.draft.days))
             story.append(Spacer(1, 4))
-            story.append(Paragraph(f"每日节奏：{rhythm_line}", st("grhythm", 8.5, color=self.GRAY)))
+            story.append(Paragraph(esc(f"每日节奏：{rhythm_line}"), st("grhythm", 8.5, color=self.GRAY)))
         story.append(Spacer(1, 8))
 
         # 4 张原则卡（内容全部由真实数据派生）
@@ -567,7 +568,7 @@ class GuideTemplate(BaseTripTemplate):
         for j, (ct, cb) in enumerate(cards):
             c = Table([[Paragraph(f'<font face="{bf}">{ct}</font>',
                                   st(f"gct{j}", 10, color=self.ACCENT, leading=14))],
-                       [Paragraph(cb, st(f"gcb{j}", 8.3, leading=12.5))]],
+                       [Paragraph(esc(cb), st(f"gcb{j}", 8.3, leading=12.5))]],
                       colWidths=[40.5 * mm])
             c.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, -1), self.CARD),
@@ -594,10 +595,10 @@ class GuideTemplate(BaseTripTemplate):
 
         def _link_cell(url: str, label: str) -> str:
             """友好锚文本超链接：原始长 URL 会把窄列按字符硬换行撑爆版面。"""
-            return f'<a href="{url}" color="{self.PRIMARY_HEX}"><u>{label}</u></a>' if url else "—"
+            return f'<a href="{esc(url)}" color="{self.PRIMARY_HEX}"><u>{esc(label)}</u></a>' if url else "—"
 
         for tk in profile.tickets:
-            info = f"{tk.depart_time} 出发 / {tk.arrive_time} 到达 · {tk.price:g} 元 · {tk.source}"
+            info = esc(f"{tk.depart_time} 出发 / {tk.arrive_time} 到达 · {tk.price:g} 元 · {tk.source}")
             flow = [self._order_card("车票", tk.train_no, info, tk.reason, tk.selected,
                                      _link_cell(tk.link, "12306 购票")), Spacer(1, 5)]
             story.append(KeepTogether(flow))
@@ -628,7 +629,7 @@ class GuideTemplate(BaseTripTemplate):
         story.append(tot)
         ref_notes = [x.source for x in (*profile.tickets, *profile.hotels) if x.reference_only]
         if ref_notes:
-            story.append(Paragraph("※ 数据来源说明：" + "；".join(sorted(set(ref_notes))),
+            story.append(Paragraph(esc("※ 数据来源说明：" + "；".join(sorted(set(ref_notes)))),
                                    st("grefnote", 8.5, color=self.WARN, spaceBefore=4, spaceAfter=4)))
         story.append(Spacer(1, 10))
 
@@ -652,8 +653,8 @@ class GuideTemplate(BaseTripTemplate):
                                   st("gbh", 9, color=self.ACCENT))
         b_rows = [[hdr("项目"), hdr("说明"), hdr("金额（元）")]]
         for k, r in enumerate(budget["items"]):
-            b_rows.append([Paragraph(r["item"], st(f"gbi{k}", 9)),
-                           Paragraph(r["note"], st(f"gbn{k}", 8.5, color=self.GRAY)),
+            b_rows.append([Paragraph(esc(r["item"]), st(f"gbi{k}", 9)),
+                           Paragraph(esc(r["note"]), st(f"gbn{k}", 8.5, color=self.GRAY)),
                            Paragraph(f"{r['amount']:g}", st(f"gba{k}", 9, alignment=2))])
         note = (f"预算 {budget['budget']:g}｜上限 {budget['budget_max']:g}｜"
                 f"占用 {budget['occupancy']:.0%}") if budget["occupancy"] else "—"

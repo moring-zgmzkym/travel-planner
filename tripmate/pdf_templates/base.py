@@ -163,6 +163,15 @@ def draw_center(draw: ImageDraw.ImageDraw, x_center_total: int, y: int,
     draw.text((x, y), text, font=font, fill=fill)
 
 
+def esc(s) -> str:
+    """外部/LLM 文本 → Paragraph XML 安全（& < > " 全转义）。
+
+    reportlab paraparser 对裸 &/< 直接抛异常——酒店名/推荐理由/链接 URL 等含一个
+    "&" 就会让整个定稿阶段报废。约定：数据进 Paragraph 前一律 esc()；模板自建
+    标记（<a>/<font>）在构造处只对插值转义，不得对整段二次转义。"""
+    return escape(str(s or ""), {'"': "&quot;"})
+
+
 class BaseTripTemplate:
     """模板基类：主题配色（类属性覆写）+ 通用积木方法 + render() 统一渲染流程。"""
 
@@ -270,7 +279,9 @@ class BaseTripTemplate:
         return t
 
     def table(self, rows: list, widths: list, font_size: int = 9, right_cols: tuple = ()) -> Table:
-        """表头品牌色白粗体；正文无竖线 + 斑马纹 + 行间细横线。单元格可传 Paragraph（原样使用）。"""
+        """表头品牌色白粗体；正文无竖线 + 斑马纹 + 行间细横线。
+
+        字符串单元格按数据对待（esc 转义）；需要标记的单元格传现成 Paragraph（原样使用）。"""
         body = []
         for i, row in enumerate(rows):
             cells = []
@@ -281,7 +292,7 @@ class BaseTripTemplate:
                 st = self.style(f"tc{i}-{j}", font_size)
                 if j in right_cols:
                     st.alignment = 2  # TA_RIGHT
-                cells.append(Paragraph(str(c), st))
+                cells.append(Paragraph(esc(c), st))
             body.append(cells)
         t = Table(body, colWidths=widths, repeatRows=1)
         t.setStyle(TableStyle([
@@ -358,18 +369,18 @@ class BaseTripTemplate:
             return ""
 
     def image_cell(self, spot: str, path: str, source: str, caption: str = "") -> Table:
-        cells = [[Paragraph(f"{spot}", self.style("imgspot", 9.5, bold=True))]]
+        cells = [[Paragraph(esc(spot), self.style("imgspot", 9.5, bold=True))]]
         try:
             p = self.crop_43(path)
             cells.append([Image(p, width=79 * mm, height=79 * mm * 3 / 4)])
         except Exception:  # noqa: BLE001 — 图片缺失降级为文字卡片（§5.2）
-            cells.append([Paragraph(f"【{spot}】图片暂缺", self.style("noimg", 10, color=self.GRAY))])
+            cells.append([Paragraph(esc(f"【{spot}】图片暂缺"), self.style("noimg", 10, color=self.GRAY))])
         if caption:
             # 图注优先走简介/游玩建议（classic 2026-09-03 需求：不再展示来源）
             cells.append([Paragraph(escape(caption), self.style("imgnote", 8.5, leading=12))])
         elif source:
             src = source if len(source) <= 96 else source[:93] + "..."
-            cells.append([Paragraph(f"来源：{src}", self.style("imgsrc", 7.5, color=self.GRAY, leading=10))])
+            cells.append([Paragraph(esc(f"来源：{src}"), self.style("imgsrc", 7.5, color=self.GRAY, leading=10))])
         t = Table(cells, colWidths=[85 * mm])
         t.setStyle(TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.5, self.HAIRLINE),

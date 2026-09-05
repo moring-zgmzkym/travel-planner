@@ -18,7 +18,8 @@ from reportlab.platypus import (Image, KeepTogether, PageBreak, Paragraph,
                                 Spacer, Table, TableStyle)
 
 from ..models import TravelProfile
-from .base import (CONTENT_W, CROP_DIR, BaseTripTemplate, bold_font_name,
+from .base import (
+    esc,CONTENT_W, CROP_DIR, BaseTripTemplate, bold_font_name,
                    draw_center, pil_font, weekday)
 
 
@@ -79,7 +80,7 @@ class MinimalTemplate(BaseTripTemplate):
                     st = self.style(f"tc{i}-{j}", font_size, color=self.INK)
                 if j in right_cols:
                     st.alignment = 2  # TA_RIGHT
-                cells.append(Paragraph(str(c), st))
+                cells.append(Paragraph(esc(c), st))
             body.append(cells)
         t = Table(body, colWidths=widths, repeatRows=1)
         t.setStyle(TableStyle([
@@ -93,14 +94,14 @@ class MinimalTemplate(BaseTripTemplate):
 
     def image_cell(self, spot: str, path: str, source: str) -> Table:
         """实景卡片：细灰线边框 + 粗体景点名 + 4:3 图（失败降级文字卡）+ 来源小字，无底色。"""
-        cells = [[Paragraph(f"{spot}", self.style("imgspot", 9.5, bold=True, color=self.INK))]]
+        cells = [[Paragraph(esc(spot), self.style("imgspot", 9.5, bold=True, color=self.INK))]]
         try:
             p = self.crop_43(path)
             cells.append([Image(p, width=79 * mm, height=79 * mm * 3 / 4)])
         except Exception:  # noqa: BLE001 — 图片缺失降级为文字卡片
-            cells.append([Paragraph(f"【{spot}】图片暂缺", self.style("noimg", 10, color=self.GRAY))])
+            cells.append([Paragraph(esc(f"【{spot}】图片暂缺"), self.style("noimg", 10, color=self.GRAY))])
         src = source if len(source) <= 96 else source[:93] + "..."
-        cells.append([Paragraph(f"来源：{src}", self.style("imgsrc", 7.5, color=self.GRAY, leading=10))])
+        cells.append([Paragraph(esc(f"来源：{src}"), self.style("imgsrc", 7.5, color=self.GRAY, leading=10))])
         t = Table(cells, colWidths=[85 * mm])
         t.setStyle(TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.5, self.HAIRLINE),
@@ -208,9 +209,9 @@ class MinimalTemplate(BaseTripTemplate):
         for i, row in enumerate(overview_rows):
             info_cells.append([
                 Paragraph(row[0], st(f"ovk{i}", 9, bold=True, color=self.GRAY)),
-                Paragraph(str(row[1]), st(f"ovv{i}", 9, color=self.INK)),
+                Paragraph(esc(row[1]), st(f"ovv{i}", 9, color=self.INK)),
                 Paragraph(row[2], st(f"ovk2-{i}", 9, bold=True, color=self.GRAY)),
-                Paragraph(str(row[3]), st(f"ovv2-{i}", 9, color=self.INK)),
+                Paragraph(esc(row[3]), st(f"ovv2-{i}", 9, color=self.INK)),
             ])
         t = Table(info_cells, colWidths=[20 * mm, 69 * mm, 20 * mm, 69 * mm])
         t.setStyle(TableStyle([
@@ -225,7 +226,7 @@ class MinimalTemplate(BaseTripTemplate):
                 f"D{i + 1} {'→'.join(d.spots[:3]) or (d.morning or '')[:12]}"
                 for i, d in enumerate(profile.draft.days))
             story.append(Spacer(1, 4))
-            story.append(Paragraph(f"每日节奏：{rhythm_line}", st("rhythm", 9, color=self.GRAY)))
+            story.append(Paragraph(esc(f"每日节奏：{rhythm_line}"), st("rhythm", 9, color=self.GRAY)))
         story.append(Spacer(1, 7))
 
         # ---- 贰 推荐订单清单 ----
@@ -233,17 +234,17 @@ class MinimalTemplate(BaseTripTemplate):
 
         def _link_cell(url: str, label: str) -> str:
             """友好锚文本超链接：原始长 URL 会把窄列按字符硬换行撑爆版面。"""
-            return (f'<a href="{url}" color="{self.PRIMARY_HEX}"><u>{label}</u></a>' if url else "—")
+            return (f'<a href="{esc(url)}" color="{self.PRIMARY_HEX}"><u>{esc(label)}</u></a>' if url else "—")
 
         order_rows = [["类型", "名称/班次", "关键信息", "推荐理由", "直达链接"]]
         for tk in profile.tickets:
-            reason = (f'<font face="{bold_font_name()}">√ 已勾选</font>　' if tk.selected else "") + (tk.reason or "")
+            reason = (f'<font face="{bold_font_name()}">√ 已勾选</font>　' if tk.selected else "") + esc(tk.reason or "")
             order_rows.append(["车票", tk.train_no,
                                f"{tk.depart_time} 出发 / {tk.arrive_time} 到达，{tk.price} 元",
                                Paragraph(reason, st("reason", 8.5)),
                                Paragraph(_link_cell(tk.link, "12306 购票"), st("linkcell", 8.5))])
         for h in profile.hotels:
-            reason = (f'<font face="{bold_font_name()}">√ 已勾选</font>　' if h.selected else "") + (h.reason or "")
+            reason = (f'<font face="{bold_font_name()}">√ 已勾选</font>　' if h.selected else "") + esc(h.reason or "")
             order_rows.append(["酒店", h.name,
                                f"{h.price_per_night:g} 元/晚，距地标 {h.distance_km:g}km，评分 {h.rating:g}",
                                Paragraph(reason, st("reason2", 8.5)),
@@ -257,7 +258,7 @@ class MinimalTemplate(BaseTripTemplate):
                                st("order_total", 10, spaceBefore=4, spaceAfter=2)))
         ref_notes = [x.source for x in (*profile.tickets, *profile.hotels) if x.reference_only]
         if ref_notes:
-            story.append(Paragraph("※ 数据来源说明：" + "；".join(sorted(set(ref_notes))),
+            story.append(Paragraph(esc("※ 数据来源说明：" + "；".join(sorted(set(ref_notes)))),
                                    st("refnote", 8.5, color=self.WARN, spaceAfter=4)))
         story.append(Spacer(1, 7))
 
@@ -268,13 +269,13 @@ class MinimalTemplate(BaseTripTemplate):
             for i, day in enumerate(profile.draft.days):
                 wk = weekday(day.date, basic.travel_dates)
                 label = f"DAY {i + 1} · {day.date}" + (f" · {wk}" if wk else "")
-                rows = [[Paragraph(label, st(f"daylbl{i}", 10.5, bold=True, color=self.INK)), ""]] + [
+                rows = [[Paragraph(esc(label), st(f"daylbl{i}", 10.5, bold=True, color=self.INK)), ""]] + [
                     [Paragraph("上午", slot_st(i)),
-                     Paragraph(day.morning or "—", st(f"daym{i}", 9.5, color=self.INK))],
+                     Paragraph(esc(day.morning or "—"), st(f"daym{i}", 9.5, color=self.INK))],
                     [Paragraph("下午", slot_st(i)),
-                     Paragraph(day.afternoon or "—", st(f"daya{i}", 9.5, color=self.INK))],
+                     Paragraph(esc(day.afternoon or "—"), st(f"daya{i}", 9.5, color=self.INK))],
                     [Paragraph("晚上", slot_st(i)),
-                     Paragraph(day.evening or "—", st(f"daye{i}", 9.5, color=self.INK))],
+                     Paragraph(esc(day.evening or "—"), st(f"daye{i}", 9.5, color=self.INK))],
                 ]
                 t = Table(rows, colWidths=[16 * mm, CONTENT_W - 16 * mm])
                 t.setStyle(TableStyle([
@@ -352,11 +353,11 @@ class MinimalTemplate(BaseTripTemplate):
                 else:
                     left_cells.append([Paragraph("酒店图片暂缺", st("noimg2", 9, color=self.GRAY))])
                 right_cells = [
-                    [Paragraph(h.name, st("hname", 11, bold=True, color=self.INK))],
+                    [Paragraph(esc(h.name), st("hname", 11, bold=True, color=self.INK))],
                     [Paragraph(f"★ {h.rating:g}｜{h.price_per_night:g} 元/晚｜距地标 {h.distance_km:g}km"
                                + (f'　<font face="{bold_font_name()}">√ 已勾选</font>' if h.selected else ""),
                                st("hmeta", 9))],
-                    [Paragraph(f"网络评价：{h.review_digest}" if h.review_digest else "网络评价：暂无",
+                    [Paragraph(esc(f"网络评价：{h.review_digest}") if h.review_digest else "网络评价：暂无",
                                st("hreview", 8.5, color=self.GRAY, leading=12))],
                 ]
                 card = Table([[left_cells, right_cells]], colWidths=[64 * mm, CONTENT_W - 64 * mm])
@@ -390,7 +391,7 @@ class MinimalTemplate(BaseTripTemplate):
             titles = list(dict.fromkeys(titles))[:5]
             foods_text = ("（攻略结构化字段未返回，以下为目的地相关搜索结果标题）" + "；".join(titles)) if titles \
                 else "暂无（攻略通道未返回）"
-            story.append(Paragraph(foods_text, st("foods", 10, color=self.INK)))
+            story.append(Paragraph(esc(foods_text), st("foods", 10, color=self.INK)))
         story.append(Spacer(1, 6))
 
         warns: list[str] = []
@@ -409,7 +410,7 @@ class MinimalTemplate(BaseTripTemplate):
             ]))
             story.append(wt)
         for i, g in enumerate(profile.guide_digest[:3]):
-            story.append(Paragraph(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）",
+            story.append(Paragraph(esc(f"攻略来源[{i + 1}]：{g.source_name} {g.source_url}（抓取 {g.fetched_at}）"),
                                    st("src", 8, color=self.GRAY, spaceBefore=3)))
         if profile.weather.get("days"):
             wline = "；".join(f"{d['date']} {d['day_text']} {d.get('temp_min', '?')}~{d.get('temp_max', '?')}℃"
