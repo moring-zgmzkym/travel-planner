@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import date as _date
@@ -307,32 +308,40 @@ async def stream_chatter(chatter: AssistantAgent, user_text: str, source: str = 
                          seen_tools: set[str] | None = None) -> str:
     """运行 Chatter 并把 Thought/Action/Observation 写入审计日志，返回最终回复文本。
 
-    seen_tools：可选集合，收集本轮真正执行过的工具名（供"宣布启动但工具未执行"兜底判定）。"""
+    seen_tools：可选集合，收集本轮真正执行过的工具名（供"宣布启动但工具未执行"兜底判定）。
+    finally aclose（修复 #1）：取消/超时路径上及时关闭 run_stream 生成器（单 Agent 无群聊
+    runtime，aclose 即取消在途 HTTP 流），不留僵尸 LLM 调用。"""
     from autogen_agentchat.messages import TextMessage, ThoughtEvent
     last = ""
     stream = chatter.run_stream(task=TextMessage(content=user_text, source=source))
-    while True:
+    try:
+        while True:
+            try:
+                msg = await stream.__anext__()
+            except StopAsyncIteration:
+                break
+            if isinstance(msg, ThoughtEvent):
+                AUDIT.thought("Chatter", msg.content)
+            elif isinstance(msg, ToolCallRequestEvent):
+                for call in msg.content:
+                    if getattr(call, "name", None):
+                        AUDIT.action("Chatter", call.name, str(getattr(call, "arguments", "")))
+            elif isinstance(msg, ToolCallExecutionEvent):
+                if seen_tools is not None:
+                    for c in msg.content:
+                        if getattr(c, "name", None):
+                            seen_tools.add(c.name)
+                obs = "; ".join(getattr(c, "content", "") or "" for c in msg.content)[:400]
+                AUDIT.observation("Chatter", obs)
+            elif isinstance(msg, BaseChatMessage) and not isinstance(msg, BaseAgentEvent):
+                if msg.source != "user":
+                    # 不给非空 fallback：清洗后为空就该走 session 的空回复 nudge，
+                    # 用"已处理您的消息。"搪塞只会掩蔽问题、让兜底链失效
+                    last = clean_reply(msg.to_text())
+                    AUDIT.output("Chatter", last)
+    finally:
         try:
-            msg = await stream.__anext__()
-        except StopAsyncIteration:
-            break
-        if isinstance(msg, ThoughtEvent):
-            AUDIT.thought("Chatter", msg.content)
-        elif isinstance(msg, ToolCallRequestEvent):
-            for call in msg.content:
-                if getattr(call, "name", None):
-                    AUDIT.action("Chatter", call.name, str(getattr(call, "arguments", "")))
-        elif isinstance(msg, ToolCallExecutionEvent):
-            if seen_tools is not None:
-                for c in msg.content:
-                    if getattr(c, "name", None):
-                        seen_tools.add(c.name)
-            obs = "; ".join(getattr(c, "content", "") or "" for c in msg.content)[:400]
-            AUDIT.observation("Chatter", obs)
-        elif isinstance(msg, BaseChatMessage) and not isinstance(msg, BaseAgentEvent):
-            if msg.source != "user":
-                # 不给非空 fallback：清洗后为空就该走 session 的空回复 nudge，
-                # 用"已处理您的消息。"搪塞只会掩蔽问题、让兜底链失效
-                last = clean_reply(msg.to_text())
-                AUDIT.output("Chatter", last)
+            await asyncio.wait_for(stream.aclose(), timeout=15.0)
+        except Exception:  # noqa: BLE001 — 清理失败不影响主流程（异常生成器由 GC 兜底）
+            AUDIT.observation("Chatter", "chatter run_stream aclose 失败/超时，已抛弃")
     return last

@@ -52,6 +52,11 @@ def _register_abandoned(task: asyncio.Task) -> None:
     task.add_done_callback(_consume_task_result)
 
 
+def register_abandoned(task: asyncio.Task) -> None:
+    """公开登记入口（team 急停路径使用）：登记被抛弃的任务直至其真正结束。"""
+    _register_abandoned(task)
+
+
 async def cancel_with_grace(task: asyncio.Task, grace_s: float = 5.0) -> bool:
     """取消任务并最多等 grace_s 让其自行清理；仍未退出则抛弃（返回 True）。
 

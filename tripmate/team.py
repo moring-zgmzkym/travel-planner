@@ -62,6 +62,50 @@ INITIAL_STEP = {"collect": "PROC_BROADCAST", "revise": "PLAN_DRAFT", "finalize":
 MARKER_DONE = "DRAFT_READY"   # collect/revise 阶段完成标记
 MARKER_FINAL = "FINAL_PDF"    # finalize 阶段完成标记
 
+# 僵尸团队治理（2026-09-05，修复 #1）：run_stream 生成器被放弃后，AutoGen 0.7.5 的群聊
+# runtime 仍在生成器体内驱动（其 finally 的 stop_when_idle = queue.join() 要等群聊自然
+# 跑完才清理）——熔断/取消/超时后团队成为后台僵尸：继续烧 token、继续写黑板。
+# 处置顺序（已对照 venv 内 autogen 0.7.5 / CPython 3.13 源码验证）：
+# ① team._runtime.stop()：shutdown(immediate=True) 丢弃"未开始"的排队轮次、只等当前在途
+#    轮（上界 ≈ 单次 LLM 调用）；CPython 对立即关闭的队列逐项标记 done，从而解除生成器
+#    finally 中 queue.join() 的阻塞；
+# ② stream.aclose()：GeneratorExit 注入触发生成器 finally 快速完成（_is_running 复位、
+#    队列清空）。两步各有超时保险丝，任一超时登记抛弃（shield 内任务继续执行）——残余为
+#    不再执行任何代码的悬空协程，KB 级，随每阶段新建的团队对象淘汰。
+_ASYNC_GEN_CLOSE_TIMEOUT_S = 15.0
+_TEAM_STOP_TIMEOUT_S = 330.0  # 略大于单轮 LLM 最坏 300s
+
+
+async def _abort_team_stream(team: SelectorGroupChat, stream) -> None:
+    """异常/取消/熔断路径的团队急停 + 生成器释放（正常完成路径由守卫跳过，零开销）。"""
+    from .tools.resilience import register_abandoned
+
+    rt = getattr(team, "_runtime", None)
+    stop_task = None
+    try:
+        if rt is not None and getattr(rt, "_run_context", None) is not None:
+            # shield：防止调用方二次取消打断 stop 的"等待当前轮收尾"，留下半停运行时
+            stop_task = asyncio.ensure_future(rt.stop())
+            await asyncio.wait_for(asyncio.shield(stop_task), timeout=_TEAM_STOP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        if stop_task is not None:
+            register_abandoned(stop_task)
+        AUDIT.observation("TeamRunner", f"团队运行时停止超时（{_TEAM_STOP_TIMEOUT_S:.0f}s），已抛弃清理任务")
+    except RuntimeError:
+        pass  # 生成器内部 shutdown_task 抢先完成了停止（正常完成竞态）
+    except asyncio.CancelledError:
+        if stop_task is not None:
+            register_abandoned(stop_task)
+        raise
+    except Exception as e:  # noqa: BLE001 — 急停失败不阻塞主流程（生成器释放仍继续）
+        AUDIT.observation("TeamRunner", f"团队运行时停止异常（{type(e).__name__}: {e}）")
+    try:
+        await asyncio.wait_for(stream.aclose(), timeout=_ASYNC_GEN_CLOSE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        AUDIT.observation("TeamRunner", "run_stream 生成器 aclose 超时（15s），已抛弃")
+    except Exception:  # noqa: BLE001
+        pass
+
 
 class SectionReadyTermination:
     """黑板目标分区在本阶段内被（重新）写入即终止（§3.6 黑板为唯一事实源；分区由工具或护栏写入）。
@@ -1144,36 +1188,41 @@ class TeamRunner:
         """事件流采集：Thought/Action/Observation → 审计日志（验收 #16）；Agent 最终消息 → 用户时间线。
 
         返回（最后一条消息文本, 全部消息文本列表）——后者供护栏从文本化调用中恢复参数。
-        """
+        finally 急停（修复 #1）：熔断/取消/异常时运行时与生成器被确定性终止，杜绝僵尸团队。"""
         from autogen_agentchat.messages import ThoughtEvent
         last_text = ""
         texts: list[str] = []
         stream = team.run_stream(task=task_text)
-        while True:
-            check_budget(self._usage_baseline)  # 逐轮检查：溢出幅度收敛到 ≤单轮（原只查阶段入口，实测超限 71% 才停）
-            try:
-                msg = await stream.__anext__()
-            except StopAsyncIteration:
-                break
-            if isinstance(msg, ThoughtEvent):
-                AUDIT.thought(msg.source, msg.content)
-            elif isinstance(msg, ToolCallRequestEvent):
-                for call in msg.content:
-                    if getattr(call, "name", None):
-                        AUDIT.action(msg.source, call.name, str(getattr(call, "arguments", "")))
-            elif isinstance(msg, ToolCallExecutionEvent):
-                obs = "; ".join(getattr(c, "content", "") or "" for c in msg.content)[:400]
-                AUDIT.observation(msg.source, obs)
-            elif isinstance(msg, BaseAgentEvent):
-                pass
-            elif isinstance(msg, BaseChatMessage):
-                last_text = msg.to_text()
-                if msg.source != "user":
-                    from .chatter import clean_reply
-                    last_text = clean_reply(last_text, fallback="（已处理）")
-                    texts.append(last_text)
-                    await self.bus.emit(msg.source, _clip_msg(last_text), "AGENT_MESSAGE")
-                    AUDIT.output(msg.source, last_text)
+        try:
+            while True:
+                check_budget(self._usage_baseline)  # 逐轮检查：溢出幅度收敛到 ≤单轮（原只查阶段入口，实测超限 71% 才停）
+                try:
+                    msg = await stream.__anext__()
+                except StopAsyncIteration:
+                    break
+                if isinstance(msg, ThoughtEvent):
+                    AUDIT.thought(msg.source, msg.content)
+                elif isinstance(msg, ToolCallRequestEvent):
+                    for call in msg.content:
+                        if getattr(call, "name", None):
+                            AUDIT.action(msg.source, call.name, str(getattr(call, "arguments", "")))
+                elif isinstance(msg, ToolCallExecutionEvent):
+                    obs = "; ".join(getattr(c, "content", "") or "" for c in msg.content)[:400]
+                    AUDIT.observation(msg.source, obs)
+                elif isinstance(msg, BaseAgentEvent):
+                    pass
+                elif isinstance(msg, BaseChatMessage):
+                    last_text = msg.to_text()
+                    if msg.source != "user":
+                        from .chatter import clean_reply
+                        last_text = clean_reply(last_text, fallback="（已处理）")
+                        texts.append(last_text)
+                        await self.bus.emit(msg.source, _clip_msg(last_text), "AGENT_MESSAGE")
+                        AUDIT.output(msg.source, last_text)
+        finally:
+            # 正常完成：runtime 已自行停止（_run_context=None 守卫跳过 stop），aclose 对
+            # 已耗尽生成器是空操作——零额外开销
+            await _abort_team_stream(team, stream)
         return last_text, texts
 
 
