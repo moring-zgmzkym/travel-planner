@@ -243,6 +243,19 @@ def _ok(**kw) -> str:
     return json.dumps(kw, ensure_ascii=False)
 
 
+def _sub_notify(bus: StatusBus, channel: str, label: str):
+    """subagent 指示灯状态回调工厂：发 STATUS_SUBAGENT（前端专用于灯，不进时间线）。
+
+    state：running（黄=运行中）/ done（绿=完成，含复用缓存）/ failed（红=失败，
+    上层已有逐通道降级说明）。"""
+    async def _notify(state: str) -> None:
+        text = {"running": f"{label}查询 worker 启动",
+                "done": f"{label}查询完成",
+                "failed": f"{label}查询失败"}.get(state, f"{label}：{state}")
+        await bus.emit("TeamRunner", text, "STATUS_SUBAGENT", channel=channel, state=state)
+    return _notify
+
+
 def make_researcher_tools(ctx: TeamContext):
     """信息收集 Agent：攻略搜索（start/collect/write 三段式）+ 图片搜索。"""
 
@@ -260,7 +273,8 @@ def make_researcher_tools(ctx: TeamContext):
             return r
 
         return await run_channel_subagent(
-            "guides", f"查询目的地「{dest}」的旅行攻略（月份/主题：{month} {style}）。调用工具即完成。", _query)
+            "guides", f"查询目的地「{dest}」的旅行攻略（月份/主题：{month} {style}）。调用工具即完成。",
+            _query, notify=_sub_notify(ctx.bus, "guides", "攻略"))
 
     async def start_guide_search() -> str:
         """启动攻略搜索任务（小红书/马蜂窝/百度三路并行）。无参数：画像从共享黑板读取。
@@ -270,6 +284,7 @@ def make_researcher_tools(ctx: TeamContext):
         if ctx.reuse.get("guides") and prof.guide_digest:
             ctx.state.step = "MCP_START"
             AUDIT.thought(AGENT_RES, f"变更影响分析：攻略复用缓存（{len(prof.guide_digest)} 份来源），不重搜")
+            await _sub_notify(ctx.bus, "guides", "攻略")("done")
             return _ok(status="reused", note="攻略复用缓存（未受变更影响）", sources=len(prof.guide_digest))
         ctx.state.step = "MCP_START"
         ctx.jobs.submit("guides", _guide_job())
@@ -375,7 +390,7 @@ def make_booking_tools(ctx: TeamContext):
         return await run_channel_subagent(
             "tickets",
             f"查询 {basic.origin or ''}→{basic.destination or ''} 的{basic.travel_mode or '高铁'}车票。调用工具即完成。",
-            _query)
+            _query, notify=_sub_notify(ctx.bus, "tickets", "车票"))
 
     async def _hotel_job() -> dict:
         prof: TravelProfile = ctx.bb.profile
@@ -391,7 +406,7 @@ def make_booking_tools(ctx: TeamContext):
 
         return await run_channel_subagent(
             "hotels", f"查询「{basic.destination or ''}」的酒店候选（偏好：{detail.hotel.location_pref or '市中心'}）。调用工具即完成。",
-            _query)
+            _query, notify=_sub_notify(ctx.bus, "hotels", "酒店"))
 
     async def _weather_job() -> dict:
         prof: TravelProfile = ctx.bb.profile
@@ -408,7 +423,8 @@ def make_booking_tools(ctx: TeamContext):
             return r
 
         return await run_channel_subagent(
-            "weather", f"查询「{basic.destination or ''}」出行期间天气预报。调用工具即完成。", _query)
+            "weather", f"查询「{basic.destination or ''}」出行期间天气预报。调用工具即完成。",
+            _query, notify=_sub_notify(ctx.bus, "weather", "天气"))
 
     async def start_booking_queries() -> str:
         """启动车票/酒店/天气三路并行查询（无参数：查询参数从共享黑板读取）。
@@ -421,19 +437,25 @@ def make_booking_tools(ctx: TeamContext):
         ctx.state.step = "RES_COLLECT"
         notes = []
 
+        _nt, _nh, _nw = (_sub_notify(ctx.bus, "tickets", "车票"),
+                         _sub_notify(ctx.bus, "hotels", "酒店"),
+                         _sub_notify(ctx.bus, "weather", "天气"))
         if not (reuse_t or basic.travel_mode in ("自驾", "长途大巴")):
             ctx.jobs.submit("tickets", _ticket_job())
         elif reuse_t:
             notes.append("车票复用缓存（变更影响分析：未受影响，不重查）")
             AUDIT.thought(AGENT_MCP, "变更影响分析：车票复用缓存，未重查")
+            await _nt("done")
         if not reuse_h:
             ctx.jobs.submit("hotels", _hotel_job())
         else:
             notes.append("酒店复用缓存（变更影响分析：未受影响，不重查）")
+            await _nh("done")
         if not (reuse_w or not basic.travel_dates):
             ctx.jobs.submit("weather", _weather_job())
         else:
             notes.append("天气复用缓存")
+            await _nw("done")
         return _ok(status="submitted", notes=notes)
 
     async def collect_booking_results() -> str:

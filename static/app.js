@@ -106,6 +106,7 @@ function switchSession(nextSid) {
   chatEl.appendChild(div);
   $("timeline").innerHTML = "";
   hideEtaChip(); // 新会话无运行中阶段
+  resetSubLights(); // 新会话灯回灰（防上一会话的状态串灯；重连补播会按序还原本会话灯态）
   setBusy(false);
   if (ws) { manualClose = true; ws.close(); } // 主动断开：立即以新 sid 重连（不走退避），服务端补播该会话状态
 }
@@ -151,7 +152,14 @@ function handleMsg(m) {
     flushOutbox();  // 补播完成标记（session 在聊天历史之后发送）：此刻补发离线消息，DOM 顺序正确
     return;
   }
+  if (m.type === "status" && m.kind === "STATUS_SUBAGENT") {
+    // Subagent 指示灯专用事件：只驱动灯（黄=运行中/绿=完成/红=失败），不进时间线
+    // ——查询过程叙述由 STATUS_COLLECT/STATUS_MCP 文本承担（2026-09-05）
+    setSubLight(m.channel, m.state);
+    return;
+  }
   if (m.type === "status" || m.type === "AGENT_MESSAGE") {
+    if (m.kind === "STATUS_PHASE") resetSubLights(); // 新阶段/检查点重跑：灯回灰，随查询重新点亮
     addTimeline(m.agent, m.kind || m.type, m.text);
     flashAgent(m.agent);
     updateEtaChip(m);
@@ -265,6 +273,42 @@ function flashAgent(name) {
   chip._t = setTimeout(() => chip.classList.remove("on"), 35000);
 }
 
+/* ---------- Subagent 指示灯（2026-09-05）：黄=运行中 / 绿=完成 / 红=失败 ---------- */
+const SUB_PARENT = { guides: "Researcher", tickets: "BookingButler", hotels: "BookingButler", weather: "BookingButler" };
+const subStates = {}; // channel → "running" | "done" | "failed"
+
+function setSubLight(channel, state) {
+  if (!channel || !["guides", "tickets", "hotels", "weather"].includes(channel)) {
+    return; // 未知通道忽略（前向兼容：服务端新增通道前端不炸）
+  }
+  subStates[channel] = state;
+  const chip = document.querySelector(`.sub-light[data-channel="${channel}"]`);
+  if (chip) {
+    chip.classList.remove("st-running", "st-done", "st-failed");
+    if (state === "running") chip.classList.add("st-running");
+    else if (state === "done") chip.classList.add("st-done");
+    else if (state === "failed") chip.classList.add("st-failed");
+  }
+  // 父 Agent 徽章联动：本父任一通道运行中 → 黄（点亮）；其全部已运行通道完成 → 绿
+  const parent = SUB_PARENT[channel];
+  if (parent) {
+    const mine = Object.entries(subStates).filter(([c]) => SUB_PARENT[c] === parent).map(([, s]) => s);
+    const pchip = document.querySelector(`.agent-chip[data-agent="${parent}"]`);
+    if (pchip) {
+      pchip.classList.remove("done");
+      if (mine.length && mine.every((s) => s === "done")) pchip.classList.add("done");
+      else if (state === "running") flashAgent(parent);
+    }
+  }
+}
+
+function resetSubLights() {
+  // 新阶段/检查点重跑/终态：灯回灰 + 清父徽章完成绿（防止上一阶段的残留状态误导）
+  for (const ch of Object.keys(subStates)) delete subStates[ch];
+  document.querySelectorAll(".sub-light").forEach((c) => c.classList.remove("st-running", "st-done", "st-failed"));
+  document.querySelectorAll(".agent-chip.done").forEach((c) => c.classList.remove("done"));
+}
+
 /* ETA chip：STATUS_PHASE（含检查点重跑）锚定预计区间，STATUS_PROGRESS 刷新已进行，
    终态（完成/停止/错误）或成品卡片到达即隐藏。chatter 的 STATUS_PHASE 无 eta 字段，容忍缺失。 */
 function updateEtaChip(m) {
@@ -273,6 +317,7 @@ function updateEtaChip(m) {
   if (m.kind === "STATUS_COMPLETED" || m.kind === "STATUS_CANCELLED" || m.kind === "STATUS_ERROR") {
     etaRange = null;
     chip.style.display = "none";
+    resetSubLights(); // 终态（完成/停止/错误）：被取消/中断的通道收不到 done，灯全部回灰防"仍在查询"误导
     return;
   }
   if (Array.isArray(m.eta_min)) etaRange = m.eta_min;

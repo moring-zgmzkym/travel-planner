@@ -417,3 +417,53 @@ def test_persistent_handshake_timeout_independent(monkeypatch):
 
     asyncio.run(main())
     assert s._session is None  # 已重置
+
+
+def test_reuse_branches_emit_subagent_done(monkeypatch):
+    """检查点重跑的复用分支：被复用通道直接发 done（前端灯绿），且不提交后台任务。"""
+    import asyncio
+    import json
+    import types
+    from tripmate.blackboard import Blackboard
+    from tripmate.models import HotelCandidate, TicketCandidate
+    from tripmate.status import StatusBus
+    from tripmate.team import JobBoard, TeamContext, TeamState, make_booking_tools
+
+    async def main():
+        bb = Blackboard()
+        bb.profile.tickets = [TicketCandidate(train_no="D636", depart_time="09:15",
+                                              arrive_time="22:40", duration_min=805,
+                                              price=609.0, link="", selected=True)]
+        bb.profile.hotels = [HotelCandidate(name="美豪R酒店", price_per_night=457.0,
+                                            distance_km=0.3, rating=4.0, link="")]
+        bb.profile.weather = {"days": []}
+        jobs = JobBoard()
+        bus = StatusBus()
+        ctx = TeamContext(bb=bb, bus=bus, state=TeamState(), jobs=jobs, runner=None,
+                          run_id="t",
+                          reuse={"tickets": True, "hotels": True, "weather": True})
+        tool = make_booking_tools(ctx)[0]
+        data = json.loads(await tool())
+        assert "复用缓存" in "".join(data["notes"])
+        evs = [e for e in bus.history() if e.get("kind") == "STATUS_SUBAGENT"]
+        states = {(e["channel"], e["state"]) for e in evs}
+        assert {("tickets", "done"), ("hotels", "done"), ("weather", "done")} <= states
+        assert not jobs.has("tickets") and not jobs.has("hotels")  # 未提交任务
+
+    asyncio.run(main())
+
+
+def test_sub_notify_emits_channel_state_fields():
+    """STATUS_SUBAGENT 事件带 channel/state 字段（前端灯数据契约）。"""
+    import asyncio
+    from tripmate.status import StatusBus
+    from tripmate.team import _sub_notify
+
+    async def main():
+        bus = StatusBus()
+        await _sub_notify(bus, "tickets", "车票")("running")
+        await _sub_notify(bus, "tickets", "车票")("done")
+        evs = [e for e in bus.history() if e.get("kind") == "STATUS_SUBAGENT"]
+        assert [(e["channel"], e["state"]) for e in evs] == [("tickets", "running"), ("tickets", "done")]
+
+    asyncio.run(main())

@@ -86,3 +86,89 @@ def test_subagent_tool_returns_json_string_payload():
         assert out == {"city": "成都&宽窄", "n": 2}
 
     asyncio.run(main())
+
+
+def test_subagent_notify_sequence_success():
+    """指示灯状态序列（成功路径）：running → done。"""
+    import asyncio
+    states = []
+
+    async def notify(state):
+        states.append(state)
+
+    async def main():
+        async def query():
+            return {"ok": 1}
+
+        out = await run_channel_subagent("tickets", "任务", query,
+                                         model_client=_tool_call_client(), notify=notify)
+        assert out == {"ok": 1}
+
+    asyncio.run(main())
+    assert states == ["running", "done"]
+
+
+def test_subagent_notify_degrade_then_done():
+    """降级直调成功也发 done（前端灯照样变绿），序列 running → done。"""
+    import asyncio
+    states = []
+
+    async def notify(state):
+        states.append(state)
+
+    async def main():
+        async def query():
+            return {"mode": "mock"}
+
+        out = await run_channel_subagent("weather", "任务", query,
+                                         model_client=_text_client(2), notify=notify)
+        assert out == {"mode": "mock"}
+
+    asyncio.run(main())
+    assert states == ["running", "done"]
+
+
+def test_subagent_notify_failed_and_reraises():
+    """subagent 未产出 + 直调也失败：failed 后原异常透传（上层逐通道降级）。"""
+    import asyncio
+    from tripmate.tools.resilience import ServiceUnavailable
+    states = []
+
+    async def notify(state):
+        states.append(state)
+
+    async def main():
+        async def query():
+            raise ServiceUnavailable("外部服务不可用")
+
+        try:
+            await run_channel_subagent("hotels", "任务", query,
+                                       model_client=_text_client(2), notify=notify)
+            raised = False
+        except ServiceUnavailable:
+            raised = True
+        assert raised
+
+    asyncio.run(main())
+    assert states == ["running", "failed"]
+
+
+def test_subagent_notify_errors_never_break_query():
+    """回调自身抛异常：被吞掉并记日志，查询结果照常返回（绝不触发重试/降级）。"""
+    import asyncio
+    calls = {"n": 0}
+
+    async def notify(state):
+        calls["n"] += 1
+        raise RuntimeError("推送通道炸了")
+
+    async def main():
+        async def query():
+            return {"ok": True}
+
+        out = await run_channel_subagent("guides", "任务", query,
+                                         model_client=_tool_call_client(), notify=notify)
+        assert out == {"ok": True}
+
+    asyncio.run(main())
+    assert calls["n"] == 2  # running + done 都尝试推送了

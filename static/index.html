@@ -51,6 +51,12 @@
         <span class="agent-chip" data-agent="Planner">🗺 计划规划</span>
         <span class="agent-chip" data-agent="TeamRunner">⚙ 调度器</span>
       </div>
+      <div class="subs-row" title="Subagent 工作指示灯：灰=未运行 · 黄=查询中 · 绿=完成 · 红=失败（自动降级并附说明）">
+        <span class="sub-light" data-channel="guides"><i></i>🔍 攻略</span>
+        <span class="sub-light" data-channel="tickets"><i></i>🚄 车票</span>
+        <span class="sub-light" data-channel="hotels"><i></i>🏨 酒店</span>
+        <span class="sub-light" data-channel="weather"><i></i>🌤 天气</span>
+      </div>
       <div class="head-right">
         <span class="agent-chip" id="eta-chip" style="display:none" title="基于实测耗时的预计等待时间"></span>
         <button id="stop-plan" title="停止当前规划任务（已收集数据保留）">⏹ 停止规划</button>

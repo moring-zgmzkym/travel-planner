@@ -50,19 +50,32 @@ def _extract_tool_output(result: Any) -> Any | None:
 
 async def run_channel_subagent(channel: str, instruction: str,
                                query: Callable[[], Awaitable[Any]],
-                               model_client=None) -> Any:
+                               model_client=None,
+                               notify: Callable[[str], Awaitable[None]] | None = None) -> Any:
     """以独立 subagent 执行一个查询通道；产出从工具事件提取，失败降级直调。
 
     channel：审计/日志标识（sub:guides 等）；instruction：任务描述（说明工具无参、
     调用即完成）；query：无参协程——同一函数既作为 subagent 的工具体，也作为降级
     直调路径（上层 mock 兜底不变）。
+    notify：可选状态回调（"running"/"done"/"failed"），驱动前端 subagent 指示灯
+    （黄=运行中/绿=完成/红=失败）；回调异常绝不影响查询主流程、绝不触发重试。
     """
     client = model_client if model_client is not None else get_model_client()
+
+    async def _notify(state: str) -> None:
+        if notify is None:
+            return
+        try:
+            await notify(state)
+        except Exception as e:  # noqa: BLE001 — 状态推送失败不影响查询
+            logger.warning("subagent 状态回调失败（%s/%s）：%s: %s", channel, state,
+                           type(e).__name__, e)
 
     async def query_channel_data() -> str:
         data = await query()
         return json.dumps(data, ensure_ascii=False, default=str)
 
+    await _notify("running")
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             agent = AssistantAgent(
@@ -76,9 +89,16 @@ async def run_channel_subagent(channel: str, instruction: str,
             data = _extract_tool_output(result)
             if isinstance(data, _EXPECT_TYPE):
                 AUDIT.observation(f"sub:{channel}", f"subagent 产出 {len(data)} 键（attempt={attempt}）")
+                await _notify("done")
                 return data
             AUDIT.observation(f"sub:{channel}", f"subagent 未产出工具结果（attempt={attempt}）")
         except Exception as e:  # noqa: BLE001 — 单通道 subagent 失败走降级，不拖垮任务
             AUDIT.observation(f"sub:{channel}", f"subagent 运行异常（attempt={attempt}）：{type(e).__name__}: {e}")
     AUDIT.observation(f"sub:{channel}", "subagent 两轮未产出，降级为直接调用查询函数")
-    return await query()
+    try:
+        out = await query()
+    except Exception:
+        await _notify("failed")
+        raise
+    await _notify("done")
+    return out

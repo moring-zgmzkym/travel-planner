@@ -68,6 +68,20 @@ body {
   transition: all .3s;
 }
 .agent-chip.on { background: var(--brand); color: #fff; }
+.agent-chip.done { background: var(--ok); color: #fff; }  /* 完成（绿）优先于活动闪烁（黄） */
+.subs-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.sub-light {
+  font-size: 11px; padding: 3px 9px; border-radius: 12px; background: #f0f3f8; color: var(--sub);
+  display: inline-flex; align-items: center; gap: 5px; transition: all .3s;
+}
+.sub-light i { width: 8px; height: 8px; border-radius: 50%; background: #c9cfda; transition: background .3s; }
+.sub-light.st-running { background: #fff7e0; color: #8a6d00; }
+.sub-light.st-running i { background: #f5b301; animation: subPulse 1.2s ease-in-out infinite; }
+.sub-light.st-done { background: #e8f6ec; color: #1a7f37; }
+.sub-light.st-done i { background: var(--ok); }
+.sub-light.st-failed { background: #fdecee; color: var(--warn); }
+.sub-light.st-failed i { background: var(--warn); }
+@keyframes subPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 .conn-dot { width: 10px; height: 10px; border-radius: 50%; background: #ccc; }
 .conn-dot.on { background: var(--ok); }
 .head-right { display: flex; align-items: center; gap: 10px; }
