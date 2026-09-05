@@ -896,9 +896,17 @@ class TeamRunner:
                              "revise": f"草稿修订（第 {self._draft_rounds} 轮）",
                              "finalize": "草稿已确认，进入定稿流程（配图 + PDF）"}[phase],
                             "STATUS_PHASE", phase=phase, eta_min=list(eta))
-        result_text, all_texts = await self._stream_team(team, task_text)
-        # 确定性护栏：阶段结束以黑板为准，缺失分区直接补齐（LLM 协议执行不完美时的可靠性兜底）
-        await self._ensure_sections(ctx, phase, all_texts)
+        # 阶段级 MCP 持久会话池（阶段二）：同通道多次调用复用一次握手——收集阶段
+        # 时延最大单项（酒店 AMAP 距离逐家全程握手 1+N 次）由此消除。护栏补齐也在
+        # 池窗口内。异常/取消路径由 finally 兜底关闭（幂等）。
+        from .tools.mcp_client import begin_mcp_pool, end_mcp_pool
+        begin_mcp_pool()
+        try:
+            result_text, all_texts = await self._stream_team(team, task_text)
+            # 确定性护栏：阶段结束以黑板为准，缺失分区直接补齐（LLM 协议执行不完美时的可靠性兜底）
+            await self._ensure_sections(ctx, phase, all_texts)
+        finally:
+            await end_mcp_pool()
 
     async def _ensure_sections(self, ctx: TeamContext, phase: str, texts: list[str]) -> None:
         """护栏（§7 精神的外推）：黑板分区缺失时确定性补齐，写入者仍记对应 Agent。

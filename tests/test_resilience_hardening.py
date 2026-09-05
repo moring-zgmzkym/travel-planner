@@ -306,3 +306,114 @@ def test_cancel_with_grace_abandons_wedged_task():
         assert not t.done()  # 已抛弃：不再等待其清理完成
 
     asyncio.run(main())
+
+
+# ---- PersistentMcpSession / 阶段级会话池（2026-09-05 阶段二）----
+
+def _fake_tool(name="ticketx"):
+    import types
+    return types.SimpleNamespace(name=name, input_schema={"properties": {"a": {}}})
+
+
+def _fake_result(payload='{"ok": 1}'):
+    import types
+    return types.SimpleNamespace(
+        isError=False,
+        content=[types.SimpleNamespace(type="text", text=payload)])
+
+
+def test_pool_reuses_session_and_falls_back_to_short_session():
+    """池启用：同通道工厂返回同一持久会话；池关闭后回退原短会话路径。"""
+    import asyncio
+    from tripmate.tools import mcp_client as m
+
+    m.begin_mcp_pool()
+    try:
+        s1 = m.train_session()
+        s2 = m.train_session()
+        assert s1 is s2 and isinstance(s1, m.PersistentMcpSession)
+        assert m._pool_get("12306") is s1
+    finally:
+        asyncio.run(m.end_mcp_pool())
+    assert m._ACTIVE_POOL is None
+    s3 = m.train_session()
+    assert type(s3) is m.McpSession  # 池未启用 → 原短会话行为（每次调用全新握手）
+
+
+def test_persistent_call_success_keeps_session():
+    import asyncio
+    import types
+    from tripmate.tools.mcp_client import PersistentMcpSession
+
+    s = PersistentMcpSession("stdio", name="t")
+    s._tools = [_fake_tool()]
+    s._session = types.SimpleNamespace(call_tool=_fake_result_call)
+
+    async def _fake_call(self, keywords, args, what):
+        return _fake_result()
+
+    async def main():
+        out = await s.call(("ticket",), {"a": 1}, "t")
+        assert out == {"ok": 1}
+        # 成功路径不重置：后续调用继续复用（这正是"多次调用一次握手"的机制）
+        assert s._session is not None and s._tools
+
+    asyncio.run(main())
+
+
+async def _fake_result_call(name, args):
+    return _fake_result()
+
+
+def test_persistent_call_resets_session_on_tool_error():
+    """调用失败（含 isError）→ 会话重置：下次调用重新握手，重试归外层 with_retry。"""
+    import asyncio
+    import types
+    import pytest
+    from tripmate.tools.mcp_client import PersistentMcpSession
+    from tripmate.tools.resilience import ServiceUnavailable
+
+    def _boom(name, args):
+        raise ServiceUnavailable("MCP 工具执行报错：车次不存在")
+
+    s = PersistentMcpSession("stdio", name="t")
+    s._tools = [_fake_tool()]
+    s._session = types.SimpleNamespace(call_tool=_boom)
+
+    async def main():
+        try:
+            await s.call(("ticket",), {"a": 1}, "t")
+            raised = False
+        except ServiceUnavailable:
+            raised = True
+        assert raised
+
+    asyncio.run(main())
+    assert s._session is None and s._tools is None  # 重置生效（下次调用重新握手）
+
+
+def test_persistent_handshake_timeout_independent(monkeypatch):
+    """握手超时独立预算：npx 冷启动慢时抛握手超时，不挤占单次调用 90s 预算。"""
+    import asyncio
+    import pytest
+    from tripmate.tools import mcp_client as m
+
+    monkeypatch.setattr(m.McpConfig, "HANDSHAKE_TIMEOUT_S", 0.1)
+
+    s = m.PersistentMcpSession("stdio", name="t")
+
+    async def slow_open():
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(s, "_ensure_open", slow_open)
+
+    async def main():
+        try:
+            await s.call(("ticket",), {}, "t")
+            raised = False
+        except m.ServiceUnavailable as e:
+            raised = "握手" in str(e)
+        assert raised
+
+    asyncio.run(main())
+    assert s._session is None  # 已重置

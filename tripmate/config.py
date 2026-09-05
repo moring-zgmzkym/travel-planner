@@ -71,11 +71,15 @@ class McpConfig:
     # mcp_client 不再使用这两个值（2026-09-04 起保留仅供外部参考）
     RETRIES: int = 2
     RETRY_DELAY_S: float = 5.0
-    # 单次 MCP 调用（含连接建立/initialize/list_tools/清理全程）的硬上限。
+    # 单次 MCP 调用（工具调用全程）的硬上限。
     # 2026-09-04 事故：传输 wedged 后 anyio 清理挂住，wait_for 超时永不生效 →
-    # collect 阶段停摆 26-47 分钟；超时任务现改为"取消→0.5s 宽限→抛弃"。
+    # collect 阶段停摆 26-47 分钟；超时任务现改为"取消→5s 宽限→抛弃"。
+    # 2026-09-05 修复：此值此前被 with_retry 默认 30s 抢先到期而实际不生效，
+    # 调用点已显式对齐；持久会话（阶段二）下它不再包含握手开销。
     # 首次运行 npx -y 12306-mcp 需下载 npm 包，冷启动慢的机器可经 .env 调大。
     CALL_TIMEOUT_S: float = float(_env("MCP_CALL_TIMEOUT_S", "90"))
+    # 持久会话握手（建连 + initialize + list_tools）独立预算（阶段二：不占用单次调用上限）。
+    HANDSHAKE_TIMEOUT_S: float = float(_env("MCP_HANDSHAKE_TIMEOUT_S", "60"))
 
 
 class WeatherConfig:
