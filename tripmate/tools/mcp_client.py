@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import AsyncExitStack
 from typing import Any
@@ -19,16 +20,19 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import MCP_DEFAULT_SSE_READ_TIMEOUT, MCP_DEFAULT_TIMEOUT
 
 from ..config import McpConfig
-from .resilience import ServiceUnavailable, with_retry
+from .resilience import ServiceUnavailable, cancel_with_grace
 
 
 def _direct_client_factory(**kwargs) -> httpx2.AsyncClient:
     """MCP HTTP 客户端工厂：端点均为国内服务，trust_env=False 直连。
 
     实测（2026-09-03）：VPN 系统代理模式下 httpx2 默认 trust_env=True 会把
-    高德/Dida 连接走本地代理，间歇性 ConnectError/TLS 失败；直连则稳定。"""
+    高德/Dida 连接走本地代理，间歇性 ConnectError/TLS 失败；直连则稳定。
+    超时用 setdefault 补缺省：mcp SDK 调工厂时若已传入 timeout 不得覆盖
+    （SSE 长读超时被缩短会杀掉长连接）。"""
     kwargs["trust_env"] = False
     kwargs.setdefault("follow_redirects", True)
+    kwargs.setdefault("timeout", httpx2.Timeout(McpConfig.TIMEOUT_S, read=MCP_DEFAULT_SSE_READ_TIMEOUT))
     return httpx2.AsyncClient(**kwargs)
 
 
@@ -69,7 +73,33 @@ class McpSession:
             raise
 
     async def call(self, keywords: tuple[str, ...], args: dict[str, Any], what: str) -> Any:
-        """按关键词在 list_tools 里找匹配工具并调用；找不到/失败抛 ServiceUnavailable。"""
+        """按关键词在 list_tools 里找匹配工具并调用；找不到/失败抛 ServiceUnavailable。
+
+        整个生命周期（连接建立 + initialize + list_tools + 调用 + 清理）受
+        McpConfig.CALL_TIMEOUT_S 硬上限保护，且超时后"取消 → 0.5s 宽限 → 抛弃"：
+        实测（2026-09-04 事故）MCP 传输 wedged 后 anyio 清理阶段会自行挂住，
+        wait_for 的超时要等任务真正退出才返回，导致上层超时永不生效、collect 阶段
+        整体停摆 26-47 分钟。抛弃 = 不再等待清理完成（登记引用直至任务真正结束）。
+        重试职责在调用方（外层 with_retry，每次重试开全新会话）——不在死会话上重试。"""
+        task = asyncio.get_running_loop().create_task(self._call_impl(keywords, args, what))
+        try:
+            _, pending = await asyncio.wait({task}, timeout=McpConfig.CALL_TIMEOUT_S)
+        except asyncio.CancelledError:
+            # 外部真实取消（用户停止/阶段取消）：取消内部任务后透传
+            await cancel_with_grace(task)
+            raise
+        if pending:
+            await cancel_with_grace(task)
+            raise ServiceUnavailable(
+                f"{what}：MCP 调用超过 {int(McpConfig.CALL_TIMEOUT_S)}s 未完成（疑似连接挂死，已抛弃）")
+        if task.cancelled():
+            raise ServiceUnavailable(f"{what}：MCP 调用被取消")
+        exc = task.exception()
+        if exc is not None:
+            raise exc
+        return task.result()
+
+    async def _call_impl(self, keywords: tuple[str, ...], args: dict[str, Any], what: str) -> Any:
         stack, session = await self._open()
         try:
             tools = await session.list_tools()
@@ -88,10 +118,7 @@ class McpSession:
             call_args = args if not schema_props else {k: v for k, v in args.items() if k in schema_props}
             if not call_args and schema_props:
                 call_args = args  # schema 不透明时原样透传
-            result = await with_retry(
-                lambda: session.call_tool(matched.name, call_args),
-                timeout_s=McpConfig.TIMEOUT_S, retries=McpConfig.RETRIES,
-                delay_s=McpConfig.RETRY_DELAY_S, what=what)
+            result = await session.call_tool(matched.name, call_args)
             return _extract_content(result)
         finally:
             await stack.aclose()

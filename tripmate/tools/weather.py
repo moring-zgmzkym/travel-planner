@@ -103,21 +103,22 @@ WMO = {
 async def query_weather(city: str, dates: list[str]) -> dict:
     """出行日期天气预报。非关键路径：失败时行程编排不做天气调整，草稿标注暂缺（§7）。"""
     try:
-        async def _geo() -> dict:
-            async with httpx.AsyncClient(timeout=WeatherConfig.TIMEOUT_S) as client:
+        # 一次天气查询（地理编码 + 预报，各带重试）共享一个客户端——原先每次尝试各开一个，
+        # 最坏 4 个；连接复用同时减少握手开销与对端连接数
+        async with httpx.AsyncClient(timeout=WeatherConfig.TIMEOUT_S) as client:
+            async def _geo() -> dict:
                 r = await client.get(WeatherConfig.GEO_URL,
                                      params={"name": city, "count": 1, "language": "zh"})
                 r.raise_for_status()
                 return r.json()
 
-        geo = await with_retry(_geo, retries=1, what="城市地理编码")
-        hits = geo.get("results") or []
-        if not hits:
-            raise ServiceUnavailable(f"未找到城市「{city}」的坐标")
-        lat, lon = hits[0]["latitude"], hits[0]["longitude"]
+            geo = await with_retry(_geo, retries=1, what="城市地理编码")
+            hits = geo.get("results") or []
+            if not hits:
+                raise ServiceUnavailable(f"未找到城市「{city}」的坐标")
+            lat, lon = hits[0]["latitude"], hits[0]["longitude"]
 
-        async def _forecast() -> dict:
-            async with httpx.AsyncClient(timeout=WeatherConfig.TIMEOUT_S) as client:
+            async def _forecast() -> dict:
                 r = await client.get(WeatherConfig.BASE_URL, params={
                     "latitude": lat, "longitude": lon,
                     "daily": "weather_code,temperature_2m_max,temperature_2m_min",
@@ -126,7 +127,7 @@ async def query_weather(city: str, dates: list[str]) -> dict:
                 r.raise_for_status()
                 return r.json()
 
-        fc = await with_retry(_forecast, retries=1, what="天气预报")
+            fc = await with_retry(_forecast, retries=1, what="天气预报")
         daily = fc.get("daily") or {}
         by_date = {}
         for i, d in enumerate(daily.get("time", [])):

@@ -45,7 +45,7 @@ async def query_tickets(origin: str, destination: str, dates: list[str], mode: s
                  "toStation": destination, "departure_date": date, "format": "json"},
                 what="12306 车票查询")
 
-        raw = await with_retry(_query, retries=0, what="12306 车票查询")
+        raw = await with_retry(_query, retries=1, what="12306 车票查询")
         candidates = _normalize_12306(raw, origin, destination, date)
         if candidates:
             return {"mode": "real", "candidates": candidates, "transport_kind": "train"}

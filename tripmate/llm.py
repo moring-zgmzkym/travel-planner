@@ -7,10 +7,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, AsyncGenerator, Literal, Mapping, Optional, Sequence
 
+import openai
 from pydantic import BaseModel
 
 from autogen_core import CancellationToken, Component
@@ -46,6 +48,12 @@ _MODEL_INFO = ModelInfo(
 # 主模型失败后的冷却期（秒）：期内直接走次级，避免每次调用都白等一次超时；
 # 冷却过后重新探测主模型，恢复即切回。
 _PRIMARY_COOLDOWN_S = 120.0
+
+# 连接类错误（APIConnectionError）的同通道快速重试延迟（秒）。
+# 实测（2026-09-04 09:52）：主备两通道同轮各报一次 APIConnectionError（瞬时网络/VPN 抖动），
+# 用户直接收到失败提示。连接错误秒级失败，同通道快速重试一次大概率救回；
+# 超时不重试（已等满 150/300s，再等翻倍）、429 不重试（限流窗口以分钟计）——二者维持直切次级。
+_CONN_RETRY_DELAY_S = 3.0
 
 
 def _build_client(base_url: str, api_key: str, model: str, timeout: float) -> OpenAIChatCompletionClient:
@@ -129,20 +137,32 @@ class _FallbackClient(ChatCompletionClient, Component[_FallbackConfig]):
     ) -> CreateResult:
         last_exc: Exception | None = None
         for idx in self._order():
-            try:
-                result = await self._client(idx).create(
-                    messages,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    json_output=json_output,
-                    extra_create_args=extra_create_args,
-                    cancellation_token=cancellation_token,
-                )
-                self._note_success(idx)
-                return result
-            except Exception as exc:  # noqa: BLE001 — 主备逐个尝试，全部失败才上抛
-                last_exc = exc
-                self._note_failure(idx, exc)
+            tries = 0
+            while True:
+                try:
+                    result = await self._client(idx).create(
+                        messages,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                        json_output=json_output,
+                        extra_create_args=extra_create_args,
+                        cancellation_token=cancellation_token,
+                    )
+                    self._note_success(idx)
+                    return result
+                except Exception as exc:  # noqa: BLE001 — 主备逐个尝试，全部失败才上抛
+                    tries += 1
+                    # 注意 APITimeoutError 是 APIConnectionError 的子类：超时已等满超时上限，
+                    # 不得快速重试（翻倍等待），仅纯连接错误（秒级失败）享受快速重试
+                    if (isinstance(exc, openai.APIConnectionError)
+                            and not isinstance(exc, openai.APITimeoutError) and tries < 2):
+                        logger.warning("%s连接错误（%s: %s），%.0fs 后同通道快速重试",
+                                       self._label(idx), type(exc).__name__, exc, _CONN_RETRY_DELAY_S)
+                        await asyncio.sleep(_CONN_RETRY_DELAY_S)
+                        continue
+                    last_exc = exc
+                    self._note_failure(idx, exc)
+                    break
         assert last_exc is not None
         raise last_exc
 
@@ -160,25 +180,37 @@ class _FallbackClient(ChatCompletionClient, Component[_FallbackConfig]):
             last_exc: Exception | None = None
             for idx in self._order():
                 yielded = False
-                try:
-                    async for chunk in self._client(idx).create_stream(
-                        messages,
-                        tools=tools,
-                        tool_choice=tool_choice,
-                        json_output=json_output,
-                        extra_create_args=extra_create_args,
-                        cancellation_token=cancellation_token,
-                    ):
-                        yielded = True
-                        yield chunk
-                    self._note_success(idx)
-                    return
-                except Exception as exc:  # noqa: BLE001
-                    last_exc = exc
-                    if yielded:
-                        # 流中途失败无法安全切换（避免重复输出半截结果），原样上抛
-                        raise
-                    self._note_failure(idx, exc)
+                tries = 0
+                while True:
+                    try:
+                        async for chunk in self._client(idx).create_stream(
+                            messages,
+                            tools=tools,
+                            tool_choice=tool_choice,
+                            json_output=json_output,
+                            extra_create_args=extra_create_args,
+                            cancellation_token=cancellation_token,
+                        ):
+                            yielded = True
+                            yield chunk
+                        self._note_success(idx)
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        if yielded:
+                            # 流中途失败无法安全切换（避免重复输出半截结果），原样上抛
+                            raise
+                        tries += 1
+                        # APITimeoutError 是 APIConnectionError 子类，同样排除（不快速重试超时）
+                        if (isinstance(exc, openai.APIConnectionError)
+                                and not isinstance(exc, openai.APITimeoutError) and tries < 2):
+                            logger.warning("%s连接错误（%s: %s），%.0fs 后同通道快速重试",
+                                           self._label(idx), type(exc).__name__, exc,
+                                           _CONN_RETRY_DELAY_S)
+                            await asyncio.sleep(_CONN_RETRY_DELAY_S)
+                            continue
+                        last_exc = exc
+                        self._note_failure(idx, exc)
+                        break
             assert last_exc is not None
             raise last_exc
 

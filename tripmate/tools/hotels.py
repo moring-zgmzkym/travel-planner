@@ -131,13 +131,20 @@ async def query_hotels(city: str, location_pref: str | None, price_range: list[f
     lo, hi = (price_range or [0, 0]) or [0, 0]
     if not (lo or hi) and budget_hint:
         hi = max(300.0, budget_hint * 0.18)
+    # 地标坐标整轮只查一次（原先每个候选都重查同一地标：5 家酒店 = 5 次冗余 MCP 会话）
+    lm_pos = None
+    if McpConfig.AMAP_API_KEY:
+        try:
+            lm_pos = await _amap_poi(amap_session(), city, location_pref or kb_for_city(city)["landmark"])
+        except (ServiceUnavailable, ValueError):
+            lm_pos = None
     filtered = []
     for c in candidates:
         pos = c.pop("_pos", None)   # 内部键：Dida 返回的酒店坐标，避免重复查高德
         p = c["price_per_night"]
         if (lo and p < lo) or (hi and p > hi):
             continue
-        c["distance_km"] = await _distance_km(city, c["name"], location_pref, hotel_pos=pos)
+        c["distance_km"] = await _distance_km(city, c["name"], location_pref, hotel_pos=pos, lm_pos=lm_pos)
         filtered.append(c)
     if not filtered:  # 区间内无候选时回退全量并提示
         filtered = candidates
@@ -145,49 +152,53 @@ async def query_hotels(city: str, location_pref: str | None, price_range: list[f
     return {"mode": mode, "notice": notice if notice else None, "candidates": filtered[:5]}
 
 
+async def _amap_poi(session, city: str, keyword: str) -> tuple[float, float] | None:
+    """高德 POI 坐标查询：text_search → 行内坐标缺失时按 id 走 search_detail 补齐。
+
+    实测（2026-09-03）：amap MCP 的 text_search 行只有 id/name/address/typecode/photo，
+    坐标需按 id 走 search_detail 补齐。session 按调用传入（McpSession.call 每次自带连接生命周期）。"""
+    raw = await with_retry(
+        lambda: session.call(("text", "search"),
+                             {"keywords": keyword, "city": city, "citylimit": "true"},
+                             what=f"高德 POI 查询（{keyword}）"),
+        retries=1, what="高德 POI 查询")
+    pois = (raw or {}).get("pois") if isinstance(raw, dict) else None
+    if not pois and isinstance(raw, dict):
+        pois = (raw.get("data", {}) or {}).get("pois")
+    for p in pois or []:
+        loc = str(p.get("location", "") or "")
+        if "," in loc:
+            lon, lat = loc.split(",")[:2]
+            return float(lon), float(lat)
+    for p in pois or []:
+        pid = str(p.get("id", "") or "")
+        if not pid:
+            continue
+        raw_d = await with_retry(
+            lambda pid=pid: session.call(("detail",), {"id": pid},
+                                         what=f"高德 POI 详情（{keyword}）"),
+            retries=1, what="高德 POI 详情")
+        detail = raw_d if isinstance(raw_d, dict) else {}
+        loc = str(detail.get("location", "") or "")
+        if "," in loc:
+            lon, lat = loc.split(",")[:2]
+            return float(lon), float(lat)
+    return None
+
+
 async def _distance_km(city: str, hotel_name: str, landmark: str | None,
-                       hotel_pos: tuple[float, float] | None = None) -> float:
+                       hotel_pos: tuple[float, float] | None = None,
+                       lm_pos: tuple[float, float] | None = None) -> float:
     """酒店距地标距离：优先用 MCP 自带的酒店坐标（省一次 POI 查询），高德补地标坐标 + 哈弗辛（真实）；
-    降级为确定性参考值。坐标口径 (lon, lat)。"""
+    降级为确定性参考值。坐标口径 (lon, lat)。lm_pos 由调用方传入（query_hotels 整轮只查一次地标）。"""
     lm = landmark or kb_for_city(city)["landmark"]
     if McpConfig.AMAP_API_KEY:
         try:
             session = amap_session()
-
-            async def _poi(keyword: str) -> tuple[float, float] | None:
-                raw = await with_retry(
-                    lambda: session.call(("text", "search"),
-                                         {"keywords": keyword, "city": city, "citylimit": "true"},
-                                         what=f"高德 POI 查询（{keyword}）"),
-                    retries=0, what="高德 POI 查询")
-                pois = (raw or {}).get("pois") if isinstance(raw, dict) else None
-                if not pois and isinstance(raw, dict):
-                    pois = (raw.get("data", {}) or {}).get("pois")
-                for p in pois or []:
-                    loc = str(p.get("location", "") or "")
-                    if "," in loc:
-                        lon, lat = loc.split(",")[:2]
-                        return float(lon), float(lat)
-                # 实测（2026-09-03）：amap MCP 的 text_search 行只有 id/name/address/typecode/photo，
-                # 坐标需按 id 走 search_detail 补齐
-                for p in pois or []:
-                    pid = str(p.get("id", "") or "")
-                    if not pid:
-                        continue
-                    raw_d = await with_retry(
-                        lambda pid=pid: session.call(("detail",), {"id": pid},
-                                                     what=f"高德 POI 详情（{keyword}）"),
-                        retries=0, what="高德 POI 详情")
-                    detail = raw_d if isinstance(raw_d, dict) else {}
-                    loc = str(detail.get("location", "") or "")
-                    if "," in loc:
-                        lon, lat = loc.split(",")[:2]
-                        return float(lon), float(lat)
-                return None
-
             if hotel_pos is None:
-                hotel_pos = await _poi(hotel_name)
-            lm_pos = await _poi(lm)
+                hotel_pos = await _amap_poi(session, city, hotel_name)
+            if lm_pos is None:
+                lm_pos = await _amap_poi(session, city, lm)
             if hotel_pos and lm_pos:
                 return round(_haversine(hotel_pos, lm_pos), 1)
         except (ServiceUnavailable, ValueError):

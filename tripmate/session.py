@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import deque
 
 from .blackboard import Blackboard
 from .chatter import build_chatter, ensure_travel_dates, stream_chatter
-from .models import Draft, FinalDelivery
+from .models import Draft, FinalDelivery, TravelProfile
+from .persistence import load_session, save_session
 from .status import AUDIT, StatusBus
 from .team import TeamRunner
 from .config import ServerConfig
@@ -46,7 +48,8 @@ def _missed_tool_call(reply: str) -> bool:
 
 
 class Session:
-    def __init__(self) -> None:
+    def __init__(self, sid: str = "") -> None:
+        self.sid = sid
         self.bb = Blackboard()
         self.bus = StatusBus(replay_limit=ServerConfig.STATUS_REPLAY)
         # 团队完成事件队列：草稿就绪 / 定稿完成 / 错误（由后台任务投递，WS 发送协程消费）
@@ -59,6 +62,48 @@ class Session:
         )
         self.chatter = build_chatter(self.bb, self.bus, self.runner)
         self.chatter_lock = asyncio.Lock()
+        # 聊天历史（2026-09-03 断线丢回复根治）：创建即记录，与发送成败无关；
+        # 断线重连时网关全量补播（此前只补状态时间线，断线窗口里的回复用户零收到）。
+        self._chat_history: deque[dict] = deque(maxlen=200)
+        # 会话持久化（2026-09-05）：有 sid 才启用（无 sid 的测试构造不落盘）。
+        # 恢复聊天历史 + 画像快照（changelog 置空、版本号保留）——服务重启后
+        # 刷新页面聊天记录与草稿/成品卡片经网关补播重现。
+        if sid:
+            self._restore()
+            self.bb.on_change = self._persist_profile
+
+    def _restore(self) -> None:
+        data = load_session(self.sid)
+        if not data:
+            return
+        for m in data.get("chat_history", [])[:200]:
+            if isinstance(m, dict):
+                self._chat_history.append(dict(m))
+        profile_data = data.get("profile")
+        if isinstance(profile_data, dict):
+            try:
+                self.bb.restore_profile(TravelProfile.model_validate(profile_data))
+            except Exception as e:  # noqa: BLE001 — 恢复失败按全新会话处理（不阻塞启动）
+                AUDIT.output("Persistence", f"会话画像恢复失败（{type(e).__name__}: {e}），按全新会话处理")
+
+    def _persist(self) -> None:
+        if not self.sid:
+            return
+        profile = self.bb.profile.model_dump(mode="json")
+        profile.pop("changelog", None)  # 重启后检查点基线重置，旧条目无用且防文件无限膨胀
+        save_session(self.sid, list(self._chat_history), profile)
+
+    def _persist_profile(self) -> None:
+        """黑板 on_change 钩子：任何写入后落盘（自身异常已在钩子层兜底）。"""
+        self._persist()
+
+    def record_chat(self, payload: dict) -> None:
+        """记录一条聊天消息（创建点调用，恰好一次；不含状态时间线事件）。"""
+        self._chat_history.append(dict(payload))
+        self._persist()
+
+    def chat_history(self) -> list[dict]:
+        return list(self._chat_history)
 
     async def handle_user_message(self, text: str) -> str:
         """用户消息 → 聊天 Agent（串行化：同一时刻仅一次 Chatter 运行）。
@@ -78,6 +123,11 @@ class Session:
                 AUDIT.output("Chatter", f"用户消息处理超过 {int(CHAT_TIMEOUT_S)}s，重建 Chatter 实例丢弃污染上下文")
                 self.chatter = build_chatter(self.bb, self.bus, self.runner)
                 return "（系统提示）刚才的请求处理超时了，请把需求再发一次，我会重新处理。"
+            except Exception as e:  # noqa: BLE001 — 非超时 LLM 失败（如主备双通道连接错误，2026-09-04 实测）：
+                # 与超时同源处理：重建实例丢弃污染上下文（无回应的用户消息残留在对话里）
+                AUDIT.output("Chatter", f"用户消息处理失败（{type(e).__name__}: {e}），重建 Chatter 实例丢弃污染上下文")
+                self.chatter = build_chatter(self.bb, self.bus, self.runner)
+                return "（系统提示）刚才的请求没有处理成功，请把需求再发一次，我会重新处理。"
             if _missed_tool_call(reply):
                 nudge = ("你上一条回复想调用的工具被序列化成了文字，没有真正执行。"
                          "请立即通过工具调用通道真正执行该工具，然后给用户一句简短的自然语言回复。")
@@ -168,6 +218,11 @@ class Session:
 
         try:
             out = await asyncio.wait_for(_do(), timeout=RELAY_TIMEOUT_S)
+        except asyncio.CancelledError:
+            # 转述被取消（如重连时网关取消旧 sender）：与超时同源——CancelledError 会留下
+            # 无回应的转述请求污染 Chatter 上下文，重建实例后透传取消（2026-09-04 加固）
+            self.chatter = build_chatter(self.bb, self.bus, self.runner)
+            raise
         except Exception as e:  # noqa: BLE001 — 转述失败必须降级，不能影响主推送链路
             AUDIT.output("Chatter", f"转述降级：{type(e).__name__}: {e}")
             # 超时取消会在 Chatter 上下文里留下无回应的转述请求，重建实例丢弃污染上下文

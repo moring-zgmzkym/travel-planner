@@ -23,7 +23,7 @@ from autogen_agentchat.teams import SelectorGroupChat
 
 from . import prompts
 from .blackboard import Blackboard
-from .config import BudgetConfig, ServerConfig
+from .config import BudgetConfig, JobConfig, ServerConfig
 from .llm import TokenBudgetExceeded, check_budget, get_model_client, reset_usage
 from .mocks.data import kb_for_city
 from .models import (Draft, DraftDay, DraftFeedback, FinalDelivery, GuideDigestItem,
@@ -33,6 +33,7 @@ from .pdf_gen import build_pdf
 from .planning import PACE_SPOTS, analyze_impact, compute_budget, validate_draft
 from .status import AUDIT, StatusBus
 from .tools.hotels import query_hotels, score_and_select as score_hotels
+from .tools.resilience import ServiceUnavailable, cancel_with_grace
 from .tools.search import search_city_covers, search_guides, search_images
 from .tools.tickets import query_tickets, score_and_select as score_tickets
 from .tools.weather import near_term_dates, query_weather
@@ -106,15 +107,24 @@ class TeamState:
 
 
 class JobBoard:
-    """并行收集任务板：start_* 工具提交后台任务，collect_* 工具收割（真并行，验收 #5）。"""
+    """并行收集任务板：start_* 工具提交后台任务，collect_* 工具收割（真并行，验收 #5）。
+
+    每个任务有从提交时刻锚定的总预算（JobConfig.TIMEOUT_S，默认 900s）：收割等待剩余
+    预算，超时即取消并抛弃挂死任务、抛 ServiceUnavailable——2026-09-04 事故中 MCP 挂死
+    曾令 collect 阶段心跳空转 26-47 分钟直至杀进程，阶段从此不可能被单个任务无限拖住。
+    每轮 _run_phase 开头 clear() 清板：检查点增量重跑的通道重新提交、预算全新；
+    收割方自身被取消（用户停止）时任务保持存活（与旧 shield 语义一致），由 clear() 统一处理。
+    """
 
     def __init__(self) -> None:
         self._jobs: dict[str, asyncio.Task] = {}
+        self._submitted_at: dict[str, float] = {}
 
     def submit(self, key: str, coro) -> None:
         if key in self._jobs and not self._jobs[key].done():
             self._jobs[key].cancel()
         self._jobs[key] = asyncio.create_task(coro)
+        self._submitted_at[key] = asyncio.get_running_loop().time()
 
     def has(self, key: str) -> bool:
         return key in self._jobs
@@ -122,13 +132,39 @@ class JobBoard:
     async def collect(self, key: str) -> Any:
         if key not in self._jobs:
             raise RuntimeError(f"任务 {key} 尚未提交")
-        return await asyncio.shield(self._jobs[key])
+        task = self._jobs[key]
+        elapsed = asyncio.get_running_loop().time() - self._submitted_at.get(key, 0.0)
+        budget = max(0.0, JobConfig.TIMEOUT_S - elapsed)
+        fut = asyncio.shield(task)
+        fut.add_done_callback(_consume_future_result)
+        try:
+            _, pending = await asyncio.wait({fut}, timeout=budget)
+        except asyncio.CancelledError:
+            raise  # 收割方被取消：任务保持存活（旧 shield 语义），由 clear() 统一处理
+        if pending:
+            await cancel_with_grace(task)
+            raise ServiceUnavailable(
+                f"任务 {key} 提交后 {elapsed:.0f}s 仍未完成（预算 {budget:.0f}s，疑似外部通道挂死，已抛弃）")
+        if task.cancelled():
+            raise ServiceUnavailable(f"任务 {key} 已被取消")
+        exc = task.exception()
+        if exc is not None:
+            raise exc
+        return task.result()
 
     def clear(self) -> None:
         for t in self._jobs.values():
             if not t.done():
                 t.cancel()
         self._jobs.clear()
+        self._submitted_at.clear()
+
+
+def _consume_future_result(fut: asyncio.Future) -> None:
+    """done 回调：显式取回结果/异常，防被抛弃的 shield future 刷 'never retrieved' 警告。"""
+    if fut.cancelled():
+        return
+    fut.exception()
 
 
 @dataclass
@@ -193,7 +229,12 @@ def make_researcher_tools(ctx: TeamContext):
         if not ctx.jobs.has("guides"):
             AUDIT.thought(AGENT_RES, "finish 自愈：start 工具未执行，自动提交搜索任务")
             ctx.jobs.submit("guides", _guide_job())
-        r = await ctx.jobs.collect("guides")
+        try:
+            r = await ctx.jobs.collect("guides")
+        except Exception as exc:  # noqa: BLE001 — 收割失败降级，攻略分区交由护栏补齐（2026-09-04 加固）
+            AUDIT.observation(AGENT_RES, f"攻略任务收割失败：{type(exc).__name__}: {exc}")
+            ctx.state.step = "MCP_COLLECT"
+            return _ok(status="error", error=f"攻略搜索任务超时/失败（{type(exc).__name__}），攻略分区将由系统护栏补齐")
         rows = r["digest"]
         if digest_json and digest_json.strip():
             try:
@@ -317,47 +358,66 @@ def make_booking_tools(ctx: TeamContext):
 
     async def collect_booking_results() -> str:
         """收割车票/酒店/天气查询结果：按 §4.4 公式打分、top1 自动勾选、写入黑板分区，
-        返回 ORDER_RECOMMEND 摘要（候选 + 勾选理由 + 直达链接 + 数据来源）。任务未启动时自动提交（自愈）。"""
+        返回 ORDER_RECOMMEND 摘要（候选 + 勾选理由 + 直达链接 + 数据来源）。任务未启动时自动提交（自愈）。
+
+        逐通道容错（2026-09-04 加固）：单通道任务超时/异常只降级该通道（空候选 + 提示），
+        绝不让整次收割炸穿——此前 MCP 挂死曾令 collect 阶段停摆至杀进程。"""
         prof: TravelProfile = ctx.bb.profile
         basic, detail = prof.basic_info, prof.detail_info
         party = _party(prof)
         reuse_notes = []
         tickets = prof.tickets  # 复用时直接取黑板缓存
         if not (ctx.reuse.get("tickets") and tickets):
-            if not ctx.jobs.has("tickets"):
-                AUDIT.thought(AGENT_MCP, "collect 自愈：start 工具未执行，自动提交车票查询")
-                ctx.jobs.submit("tickets", _ticket_job())
-            tr = await ctx.jobs.collect("tickets")
-            tickets = [TicketCandidate(**t) for t in score_tickets(tr["candidates"], party)]
-            await ctx.bb.write("tickets", tickets, "booking", "车票候选与勾选" + ("（降级参考值）" if tr["mode"] == "mock" else "（MCP 实时）"))
-            if tr.get("notice"):
-                reuse_notes.append(tr["notice"])
+            try:
+                if not ctx.jobs.has("tickets"):
+                    AUDIT.thought(AGENT_MCP, "collect 自愈：start 工具未执行，自动提交车票查询")
+                    ctx.jobs.submit("tickets", _ticket_job())
+                tr = await ctx.jobs.collect("tickets")
+                tickets = [TicketCandidate(**t) for t in score_tickets(tr["candidates"], party)]
+                await ctx.bb.write("tickets", tickets, "booking", "车票候选与勾选" + ("（降级参考值）" if tr["mode"] == "mock" else "（MCP 实时）"))
+                if tr.get("notice"):
+                    reuse_notes.append(tr["notice"])
+            except Exception as exc:  # noqa: BLE001 — 单通道失败降级为空候选，不阻塞收割
+                AUDIT.observation(AGENT_MCP, f"车票通道收割失败，降级为空候选：{type(exc).__name__}: {exc}")
+                tickets = []
+                reuse_notes.append(f"车票通道暂不可用（{type(exc).__name__}），本次无车票候选")
         else:
             reuse_notes.append("车票复用缓存（未重查）")
         hotels = prof.hotels
         if not (ctx.reuse.get("hotels") and hotels):
-            if not ctx.jobs.has("hotels"):
-                AUDIT.thought(AGENT_MCP, "collect 自愈：start 工具未执行，自动提交酒店查询")
-                ctx.jobs.submit("hotels", _hotel_job())
-            hr = await ctx.jobs.collect("hotels")
-            hotels = [HotelCandidate(**h) for h in score_hotels(hr["candidates"], detail.hotel.price_range)]
-            await ctx.bb.write("hotels", hotels, "booking", "酒店候选与勾选" + ("（降级参考值）" if hr["mode"] == "mock" else "（MCP 实时）"))
-            # 需求 6：勾选酒店补充宣传图与住客评价摘要（失败留空，不影响主流程）
             try:
-                from .tools.hotels import enrich_hotels
-                await enrich_hotels(hotels, basic.destination or "")
-                if any(h.image_path or h.review_digest for h in hotels):
-                    await ctx.bb.write("hotels", hotels, "booking", "酒店宣传图与评价摘要补充")
-            except Exception as exc:  # noqa: BLE001 — 增强失败只记审计
-                AUDIT.observation("BookingButler", f"酒店信息补充失败（不影响主流程）：{exc}")
-            if hr.get("notice"):
-                reuse_notes.append(hr["notice"])
+                if not ctx.jobs.has("hotels"):
+                    AUDIT.thought(AGENT_MCP, "collect 自愈：start 工具未执行，自动提交酒店查询")
+                    ctx.jobs.submit("hotels", _hotel_job())
+                hr = await ctx.jobs.collect("hotels")
+                hotels = [HotelCandidate(**h) for h in score_hotels(hr["candidates"], detail.hotel.price_range)]
+                await ctx.bb.write("hotels", hotels, "booking", "酒店候选与勾选" + ("（降级参考值）" if hr["mode"] == "mock" else "（MCP 实时）"))
+                if hr.get("notice"):
+                    reuse_notes.append(hr["notice"])
+            except Exception as exc:  # noqa: BLE001 — 单通道失败降级为空候选，不阻塞收割
+                AUDIT.observation(AGENT_MCP, f"酒店通道收割失败，降级为空候选：{type(exc).__name__}: {exc}")
+                hotels = []
+                reuse_notes.append(f"酒店通道暂不可用（{type(exc).__name__}），本次无酒店候选")
+            else:
+                # 需求 6：勾选酒店补充宣传图与住客评价摘要（失败留空，不影响主流程）
+                try:
+                    from .tools.hotels import enrich_hotels
+                    await enrich_hotels(hotels, basic.destination or "")
+                    if any(h.image_path or h.review_digest for h in hotels):
+                        await ctx.bb.write("hotels", hotels, "booking", "酒店宣传图与评价摘要补充")
+                except Exception as exc:  # noqa: BLE001 — 增强失败只记审计
+                    AUDIT.observation("BookingButler", f"酒店信息补充失败（不影响主流程）：{exc}")
         else:
             reuse_notes.append("酒店复用缓存（未重查）")
         weather = prof.weather
         if ctx.jobs.has("weather"):
-            weather = await ctx.jobs.collect("weather")
-            await ctx.bb.write("weather", weather, "booking", "出行天气")
+            try:
+                weather = await ctx.jobs.collect("weather")
+                await ctx.bb.write("weather", weather, "booking", "出行天气")
+            except Exception as exc:  # noqa: BLE001 — 天气失败降级为空（草稿标注暂缺）
+                AUDIT.observation(AGENT_MCP, f"天气通道收割失败，降级为空：{type(exc).__name__}: {exc}")
+                weather = prof.weather or {}
+                reuse_notes.append(f"天气通道暂不可用（{type(exc).__name__}）")
         elif not weather:
             weather = {}
         ctx.state.step = "PROC_SUMMARIZE"
@@ -522,6 +582,8 @@ class TeamRunner:
         self._draft_rounds = 0
         self._base_version = 0               # 检查点基准版本
         self._rerun_budget = 2               # 检查点触发增量重跑的次数上限
+        self._digest_done = False            # 攻略笔记提炼幂等标志（start() 重置：换城二次规划不得沿用上一轮"已尝试"结论）
+        self._cover_done = False             # 封面图检索幂等标志（同上）
         self.active = False                  # 规划态标志（闲置态 = False，验收 #2）
         self._last_destination = ""          # 上一轮目的地（新一轮规划时清空数据分区的判据）
 
@@ -543,11 +605,16 @@ class TeamRunner:
         dest = prof.basic_info.destination or ""
         clear: dict[str, Any] = {"draft": None, "draft_feedback": None, "final": None, "plan_input": None}
         if dest != self._last_destination:
-            clear.update({"tickets": [], "hotels": [], "guide_digest": [], "weather": {}, "images": []})
+            # spot_notes/food_notes/cover_images 一并清：旧城市的笔记/封面混入新 PDF 是正确性 bug
+            # （2026-09-04 核查：此前只清数据分区，笔记与封面残留且幂等标志阻止重取）
+            clear.update({"tickets": [], "hotels": [], "guide_digest": [], "weather": {}, "images": [],
+                          "spot_notes": [], "food_notes": [], "cover_images": []})
         self._last_destination = dest
         self.bb.clear_sections(clear, "system", f"新一轮规划（{dest or '目的地待定'}）：清空上一轮残留")
         self._draft_rounds = 0
         self._rerun_budget = 2
+        self._digest_done = False
+        self._cover_done = False
         self._base_version = self.bb.version()
         self.active = True
         self._awaiting_feedback = False

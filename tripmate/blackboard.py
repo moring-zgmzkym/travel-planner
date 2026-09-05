@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .models import ChangelogEntry, TravelProfile, WriterName
+
+logger = logging.getLogger("tripmate.blackboard")
 
 
 def _now() -> str:
@@ -20,6 +23,22 @@ class Blackboard:
     def __init__(self) -> None:
         self._profile = TravelProfile()
         self._lock = asyncio.Lock()
+        # 持久化钩子（2026-09-05）：Session 注册；每次写入后锁外调用，失败绝不影响黑板主流程
+        self.on_change: Callable[[], None] | None = None
+
+    def _notify_change(self) -> None:
+        if self.on_change is None:
+            return
+        try:
+            self.on_change()
+        except Exception as e:  # noqa: BLE001 — 持久化失败不阻塞规划
+            logger.warning("黑板持久化钩子失败（%s: %s）", type(e).__name__, e)
+
+    def restore_profile(self, profile: TravelProfile) -> None:
+        """重启恢复：整对象替换画像（版本号保留；changelog 由持久化层置空）。
+
+        仅恢复场景使用——不触发 on_change（恢复过程中不回写磁盘）。"""
+        self._profile = profile
 
     # ---- 读（无锁，Pydantic 对象替换式写保证读侧一致性） ----
     @property
@@ -53,6 +72,7 @@ class Blackboard:
                 new=_short(value),
                 reason=reason,
             ))
+        self._notify_change()
 
     # ---- 写（串行化 + changelog + 版本号） ----
     async def write(
@@ -79,10 +99,13 @@ class Blackboard:
                 new=_short(value),
                 reason=reason,
             ))
-            return self._profile.version
+            version = self._profile.version
+        self._notify_change()  # 锁外触发：同步磁盘写不拉长写锁临界区
+        return version
 
     async def apply_basic_info(self, updates: dict[str, Any], writer: WriterName, reason: str) -> int:
         """合并式更新 basic_info（逐字段记 changelog，供变更影响分析 §5.3）。"""
+        changed = False
         async with self._lock:
             basic = self._profile.basic_info.model_copy()
             for key, new_val in updates.items():
@@ -99,10 +122,15 @@ class Blackboard:
                         old=_short(old_val), new=_short(new_val), reason=reason,
                     )
                 )
-            self._profile.basic_info = basic
-            self._profile.version += 1
-            self._profile.updated_at = _now()
-            return self._profile.version
+                changed = True
+            if changed:
+                self._profile.basic_info = basic
+                self._profile.version += 1
+                self._profile.updated_at = _now()
+            version = self._profile.version
+        if changed:
+            self._notify_change()
+        return version
 
     async def apply_detail_info(self, updates: dict[str, Any], writer: WriterName, reason: str) -> int:
         """合并式更新 detail_info（hotel 子对象同样逐字段记录）。"""
@@ -139,7 +167,10 @@ class Blackboard:
                 self._profile.detail_info = detail
                 self._profile.version += 1
                 self._profile.updated_at = _now()
-            return self._profile.version
+            version = self._profile.version
+        if changed:
+            self._notify_change()
+        return version
 
     # ---- 变更影响分析输入（§5.3）：自某版本以来用户侧（chatter）写入的变更 ----
     def user_changes_since(self, version: int) -> list[ChangelogEntry]:

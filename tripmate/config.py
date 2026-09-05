@@ -13,7 +13,8 @@ load_dotenv(BASE_DIR / ".env")
 OUTPUT_DIR = BASE_DIR / "outputs"
 IMAGE_DIR = OUTPUT_DIR / "images"
 LOG_DIR = BASE_DIR / "logs"
-for _d in (OUTPUT_DIR, IMAGE_DIR, LOG_DIR):
+SESSIONS_DIR = BASE_DIR / "sessions"  # 会话持久化（聊天历史+画像快照，2026-09-05）
+for _d in (OUTPUT_DIR, IMAGE_DIR, LOG_DIR, SESSIONS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
@@ -66,8 +67,15 @@ class McpConfig:
     MCP_HOTEL_URL: str = _env("MCP_HOTEL_URL")
     MCP_HOTEL_TOKEN: str = _env("MCP_HOTEL_TOKEN")
     TIMEOUT_S: float = 30.0
+    # 重试职责在调用方（外层 with_retry，每次重试开全新会话）——不在死会话上重试；
+    # mcp_client 不再使用这两个值（2026-09-04 起保留仅供外部参考）
     RETRIES: int = 2
     RETRY_DELAY_S: float = 5.0
+    # 单次 MCP 调用（含连接建立/initialize/list_tools/清理全程）的硬上限。
+    # 2026-09-04 事故：传输 wedged 后 anyio 清理挂住，wait_for 超时永不生效 →
+    # collect 阶段停摆 26-47 分钟；超时任务现改为"取消→0.5s 宽限→抛弃"。
+    # 首次运行 npx -y 12306-mcp 需下载 npm 包，冷启动慢的机器可经 .env 调大。
+    CALL_TIMEOUT_S: float = float(_env("MCP_CALL_TIMEOUT_S", "90"))
 
 
 class WeatherConfig:
@@ -76,6 +84,18 @@ class WeatherConfig:
     BASE_URL: str = _env("WEATHER_BASE_URL", "https://api.open-meteo.com/v1/forecast")
     GEO_URL: str = _env("WEATHER_GEO_URL", "https://geocoding-api.open-meteo.com/v1/search")
     TIMEOUT_S: float = 20.0
+
+
+class JobConfig:
+    """后台收集任务（JobBoard）预算：单任务从提交时刻起算的总时长上限（秒）。
+
+    2026-09-04 事故：MCP 挂死令 collect 阶段心跳空转 26-47 分钟直至杀进程——
+    任务超时即被抛弃并降级，阶段永不因单个任务停摆。最坏合法路径核算约 820s
+    （酒店：3×90s MCP 查询 + 6×90s 高德 POI），900s 兜底不会误杀正常任务；
+    检查点增量重跑时 clear() 清板，受影响通道重新提交、预算全新（用户改需求
+    触发的重跑不受上一轮预算残留影响）。"""
+
+    TIMEOUT_S: float = float(_env("JOB_TIMEOUT_S", "900"))
 
 
 class BudgetConfig:

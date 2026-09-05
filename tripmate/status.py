@@ -62,7 +62,7 @@ class StatusBus:
         }
         self._history.append(event)
         LOGGER.info("[%s] %s %s", agent, kind, text)
-        for q in self._subs:
+        for q in list(self._subs):  # 快照遍历：await put 期间退订（列表突变）会跳过后续订阅者
             await q.put(event)
 
     def emit_sync(self, agent: str, text: str, kind: str = "STATUS_PROGRESS", **extra) -> None:

@@ -6,6 +6,12 @@ const chat = $("chat"), timeline = $("timeline"), input = $("input"), sendBtn = 
 
 let ws = null;
 let pingTimer = null;
+let reconnectTimer = null;
+let reconnectDelay = 2000; // 意外断线的重连退避：2s 起 ×2 递增，30s 封顶（连接成功后重置）
+let manualClose = false;   // 主动断开（切换会话）：不走退避，立即重连
+let missedPongs = 0;       // 连续未收到 pong 的心跳次数（空闲期 ≥2 判定半开连接，主动重连）
+let outbox = [];           // 离线待发消息 [{sid, text}]：断连期间发送不再静默丢弃，重连后自动补发
+let welcomeNode = null;    // 欢迎/示例输入（进入页面时保存引用，清空聊天面板后统一放回——示例是使用指导）
 let busyTimer = null;
 let busy = false; // Chatter 处理中（等待回复期间禁止重复发送）
 let reconnected = false; // 是否发生过断线重连（首页首连不提示）
@@ -23,9 +29,25 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}/ws?sid=${encodeURIComponent(sid)}`);
   ws.onopen = () => {
     $("conn-dot").classList.add("on");
+    const chatEl = $("chat");
+    if (!welcomeNode) welcomeNode = chatEl.querySelector(".msg.sys");  // 首次保存欢迎/示例引用
+    chatEl.innerHTML = "";  // 服务端将全量补播（状态+聊天历史），先清面板防重连重复渲染
+    $("timeline").innerHTML = "";  // 同上：时间线由状态补播重建（修软重连重复叠加）
+    if (welcomeNode) chatEl.appendChild(welcomeNode);  // 示例放回头部，补播消息接在其后
+    reconnectDelay = 2000;  // 连接成功：重置退避
+    missedPongs = 0;
     if (pingTimer) clearInterval(pingTimer);
-    pingTimer = setInterval(() => {  // 心跳 30s（§2.3）
-      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
+    pingTimer = setInterval(() => {  // 心跳 25s（§2.3）
+      if (!ws || ws.readyState !== 1) return;
+      // 半开连接检测：空闲期连续 2 次（~50s）未收到 pong → 主动断开走重连。
+      // busy（等待聊天回复）期间豁免：服务端接收循环被处理阻塞，pong 会积压到回合结束才回。
+      if (!busy && missedPongs >= 2) {
+        addTimeline("System", "STATUS_ERROR", "连接长时间无响应，正在重新连接…");
+        ws.close();
+        return;
+      }
+      missedPongs++;
+      ws.send(JSON.stringify({ type: "ping", ts: Date.now() }));
     }, 25000);
     if (reconnected) {  // 断线重连：解除"思考中"死锁（回复可能已随断线丢失，2026-08-30）
       setBusy(false);
@@ -36,7 +58,13 @@ function connect() {
   };
   ws.onclose = () => {
     $("conn-dot").classList.remove("on");
-    setTimeout(connect, 2000);  // 自动重连 + 服务端补发（风险 #7）
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    const wasManual = manualClose;
+    manualClose = false;
+    const delay = wasManual ? 0 : reconnectDelay;
+    reconnectDelay = wasManual ? 2000 : Math.min(reconnectDelay * 2, 30000); // 指数退避（成功后重置）
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, delay);  // 自动重连 + 服务端补发（风险 #7）
   };
   ws.onmessage = (e) => handleMsg(JSON.parse(e.data));
 }
@@ -68,15 +96,18 @@ function switchSession(nextSid) {
   if (nextSid === sid) return;
   sid = nextSid;
   localStorage.setItem("tm_sid", sid);
-  $("chat").innerHTML = "";
+  const chatEl = $("chat");
+  if (!welcomeNode) welcomeNode = chatEl.querySelector(".msg.sys");
+  chatEl.innerHTML = "";
+  if (welcomeNode) chatEl.appendChild(welcomeNode);  // 示例是使用指导：切换会话也要保留（2026-09-05）
   const div = document.createElement("div");
   div.className = "msg sys";
   div.textContent = "已切换对话。该对话的规划进展与成果如下方所示（历史消息不跨对话保留）。";
-  $("chat").appendChild(div);
+  chatEl.appendChild(div);
   $("timeline").innerHTML = "";
   hideEtaChip(); // 新会话无运行中阶段
   setBusy(false);
-  if (ws) ws.close(); // onclose 自动以新 sid 重连，服务端补播该会话状态
+  if (ws) { manualClose = true; ws.close(); } // 主动断开：立即以新 sid 重连（不走退避），服务端补播该会话状态
 }
 
 async function createSession() {
@@ -117,6 +148,7 @@ function handleMsg(m) {
     localStorage.setItem("tm_sid", sid);
     const sel = $("session-select");
     if (sel.value !== sid) { refreshSessions(); }
+    flushOutbox();  // 补播完成标记（session 在聊天历史之后发送）：此刻补发离线消息，DOM 顺序正确
     return;
   }
   if (m.type === "status" || m.type === "AGENT_MESSAGE") {
@@ -124,7 +156,7 @@ function handleMsg(m) {
     flashAgent(m.agent);
     updateEtaChip(m);
   } else if (m.type === "chat") {
-    if (m.role === "user") return; // 客户端已乐观渲染，跳过回显
+    if (m.role === "user" && !m.replay) return; // 实时回显跳过（乐观渲染已画）；补播的需重画（刷新后 DOM 已重置）
     addChat(m.role, m.text);
     setBusy(false);
   } else if (m.type === "draft") {
@@ -137,8 +169,9 @@ function handleMsg(m) {
     renderProfile(m.profile);
   } else if (m.type === "usage") {
     renderUsage(m.usage);
+  } else if (m.type === "pong") {
+    missedPongs = 0; // 半开连接检测：收到 pong 即视为链路健康
   }
-  // "pong" 忽略
 }
 
 /* ---------- 渲染 ---------- */
@@ -286,12 +319,30 @@ function esc(s) {
 }
 
 /* ---------- 发送 ---------- */
+function flushOutbox() {
+  if (!outbox.length) return;
+  const pending = outbox.filter((o) => o.sid === sid);
+  outbox = outbox.filter((o) => o.sid !== sid);  // 其他会话的离线消息保留，切回时再补发
+  if (!pending.length) return;
+  addTimeline("System", "INFO", `自动补发离线消息 ${pending.length} 条…`);
+  for (const o of pending) {
+    sendMsg(o.text);
+    addChat("user", o.text);  // 重画回显：离线期间的乐观回显已随面板清空，服务端收到的才不重发
+  }
+  setBusy(true);  // 服务端 chatter_lock 串行处理，回复按序到达后逐条解锁
+}
+
 function doSend() {
   const text = input.value.trim();
-  if (!text || busy || !ws || ws.readyState !== 1) return;
+  if (!text || busy) return;
   input.value = "";
   setBusy(true);
-  sendMsg(text);
+  if (ws && ws.readyState === 1) {
+    sendMsg(text);
+  } else {
+    outbox.push({ sid, text });  // 离线不丢弃（要求 1：用户消息必有回复——重连后自动补发）
+    addTimeline("System", "INFO", "当前离线，消息已保存，重连后自动发送。");
+  }
   addChat("user", text); // 乐观渲染（服务端回显时去重）
 }
 sendBtn.addEventListener("click", doSend);

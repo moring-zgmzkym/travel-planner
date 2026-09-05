@@ -36,21 +36,22 @@ _PREFERRED_HOSTS = ("chinadaily.com", "gmw.cn", "jiemian.com", "people.com.cn", 
                     "thepaper.cn", "chinanews.com", "ce.cn", "china.com.cn")
 
 
-async def _tavily(query: str, search_depth: str = "basic", max_results: int = 5) -> dict:
+async def _tavily(client: httpx.AsyncClient, query: str, search_depth: str = "basic", max_results: int = 5) -> dict:
+    """Tavily 文本搜索。客户端由调用方传入（共享连接池，7 路查询不再各开 7 个客户端）。"""
+
     async def _call() -> dict:
-        async with httpx.AsyncClient(timeout=SearchConfig.TIMEOUT_S) as client:
-            r = await client.post(
-                TAVILY_URL,
-                json={
-                    "api_key": SearchConfig.TAVILY_API_KEY,
-                    "query": query,
-                    "search_depth": search_depth,
-                    "max_results": max_results,
-                    "include_answer": True,
-                },
-            )
-            r.raise_for_status()
-            return r.json()
+        r = await client.post(
+            TAVILY_URL,
+            json={
+                "api_key": SearchConfig.TAVILY_API_KEY,
+                "query": query,
+                "search_depth": search_depth,
+                "max_results": max_results,
+                "include_answer": True,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
 
     return await with_retry(_call, timeout_s=SearchConfig.TIMEOUT_S, retries=SearchConfig.RETRIES,
                             delay_s=SearchConfig.RETRY_DELAY_S, what=f"Tavily 搜索「{query}」")
@@ -77,11 +78,19 @@ def _guide_queries(destination: str, month_hint: str = "", style_hint: str = "")
 
 async def search_guides(destination: str, month_hint: str = "", style_hint: str = "") -> dict:
     """多类查询（§4.3）：站点限定 + 主题专题共 7 路并行（2026-08-30 扩容：攻略信息量不足以
-    支撑贴合用户需求的行程，增加美食/避坑/路线/景点专题路），每路 top8 去重合并。"""
+    支撑贴合用户需求的行程，增加美食/避坑/路线/景点专题路），每路 top8 去重合并。
+    7 路共享一个 httpx 客户端（连接复用）+ 信号量限 3 并发（平滑 Tavily 突发，与图片链路一致）。"""
     queries = _guide_queries(destination or "", month_hint, style_hint)
     if SearchConfig.TAVILY_API_KEY:
-        results = await asyncio.gather(*[_tavily(q, max_results=8) for q, _ in queries],
-                                       return_exceptions=True)
+        sem = asyncio.Semaphore(3)
+
+        async def _one(q: str) -> dict:
+            async with sem:
+                return await _tavily(client, q, max_results=8)
+
+        async with httpx.AsyncClient(timeout=SearchConfig.TIMEOUT_S) as client:
+            results = await asyncio.gather(*[_one(q) for q, _ in queries],
+                                           return_exceptions=True)
         digest = []
         for (query, name), res in zip(queries, results):
             if isinstance(res, Exception):

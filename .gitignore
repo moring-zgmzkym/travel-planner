@@ -4,6 +4,7 @@ __pycache__/
 logs/
 outputs/images/
 outputs/*.pdf
+sessions/
 .pytest_cache/
 learning/
 outputs/

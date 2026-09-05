@@ -138,22 +138,28 @@ def test_sender_survives_relay_crash(monkeypatch):
     asyncio.run(main())
 
 
-def test_send_failure_compensates_to_timeline():
-    """回复发送失败（socket 已断）→ 降级写入时间线，断线重连补播可见（2026-08-31 P1）。"""
+def test_failed_chat_send_recorded_for_replay():
+    """断线丢回复根治回归（2026-09-03）：chat 在创建点（_chat）即入 chat_history，
+    发送失败也不丢——重连补播 sess.chat_history() 全量可见；status 事件不入聊天历史。
+    （取代旧"120 字降级写入时间线"补偿方案。）"""
     import asyncio
     import types
     import tripmate.gateway.app as app
-    from tripmate.status import StatusBus
 
     class BoomWS:
         async def send_text(self, *_):
             raise RuntimeError("Cannot send, closed")
 
-    sess = types.SimpleNamespace(bus=StatusBus())
-    asyncio.run(app._send(BoomWS(), {"type": "chat", "role": "chatter", "text": "回复内容ABC"}, sess))
-    evs = [e for e in sess.bus.history() if str(e.get("text", "")).startswith("（可能未送达）")]
-    assert evs and "回复内容ABC" in evs[0]["text"]
-    # 用户回显与 status 事件不触发补偿
-    asyncio.run(app._send(BoomWS(), {"type": "chat", "role": "user", "text": "x"}, sess))
-    asyncio.run(app._send(BoomWS(), {"type": "status", "kind": "STATUS_INFO", "text": "y"}, sess))
-    assert len([e for e in sess.bus.history() if str(e.get("text", "")).startswith("（可能未送达）")]) == 1
+    history: list[dict] = []
+    sess = types.SimpleNamespace(record_chat=history.append)
+    chatter_msg = {"type": "chat", "role": "chatter", "text": "断线期间的回复"}
+    asyncio.run(app._chat(BoomWS(), sess, chatter_msg))
+    # 发送失败不影响：历史里已有完整消息（重连补播可见）
+    assert history == [chatter_msg]
+    # 用户回显也记录；status 事件不入聊天历史（status 走 _send）
+    asyncio.run(app._chat(BoomWS(), sess, {"type": "chat", "role": "user", "text": "x"}))
+    asyncio.run(app._send(BoomWS(), {"type": "status", "kind": "STATUS_INFO", "text": "y"}))
+    assert len(history) == 2 and history[1]["role"] == "user"
+    assert all(m.get("type") == "chat" for m in history)
+    # replay 标记只在补播发送副本上打，存储历史不受污染
+    assert all("replay" not in m for m in history)
