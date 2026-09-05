@@ -48,3 +48,34 @@ def test_missing_required():
     assert b.missing_required() == ["出发地", "目的地", "游玩天数"]
     b.origin, b.destination, b.days = "上海", "成都", 3
     assert b.missing_required() == []
+
+
+def test_changed_fields_chain_hotel_impact_end_to_end():
+    """端到端回归（2026-09-05 修复）：apply_detail_info 写入的 hotel.* 变更，经
+    user_changes_since → _changed_fields → analyze_impact 必须命中 {"hotels"}——
+    此前 _changed_fields 拼了 "detail_info." 前缀导致永远查不中 FIELD_IMPACT。"""
+    from tripmate.planning import analyze_impact
+    from tripmate.team import _changed_fields
+
+    bb = Blackboard()
+    run(bb.apply_basic_info({"origin": "上海"}, "chatter", "输入"))
+    base = bb.version()
+    run(bb.apply_detail_info({"hotel": {"price_range": [300, 500]}}, "chatter", "改酒店偏好"))
+    run(bb.apply_basic_info({"defaults_applied": ["出行方式默认高铁"]}, "chatter", "默认值"))
+    fields = _changed_fields(bb.user_changes_since(base))
+    assert fields == ["hotel.price_range"]
+    assert analyze_impact(fields) == {"hotels"}
+
+
+def test_changed_fields_party_size_and_days_impact():
+    from tripmate.planning import analyze_impact
+    from tripmate.team import _changed_fields
+
+    bb = Blackboard()
+    base = bb.version()
+    run(bb.apply_detail_info({"party_size": 3}, "chatter", "改人数"))
+    run(bb.apply_basic_info({"days": 4}, "chatter", "改天数"))
+    fields = _changed_fields(bb.user_changes_since(base))
+    assert "party_size" in fields and "days" in fields
+    affected = analyze_impact(fields)
+    assert {"tickets", "hotels", "weather", "itinerary"} <= affected

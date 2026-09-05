@@ -52,3 +52,32 @@ def test_session_title_derives_from_profile():
 
     s.runner = _R()
     assert _session_title(s) == "汉中 · 规划中"
+
+
+def test_days_change_without_new_dates_reexpands_travel_dates():
+    """days 变更而未给新日期：按既有出发日重展开逐日序列（防天数/日期口径漂移）。"""
+    import asyncio
+    from tripmate.chatter import _reexpand_dates_after_days_change
+    from tripmate.models import BasicInfo, TravelProfile
+
+    prof = TravelProfile(basic_info=BasicInfo(days=3, travel_dates=["2026-10-01", "2026-10-02", "2026-10-03"]))
+    updates = {"days": 4}
+    _reexpand_dates_after_days_change(updates, prof)
+    assert updates["travel_dates"] == ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"]
+
+
+def test_days_change_keeps_explicit_dates_and_ignores_invalid():
+    import asyncio
+    from tripmate.chatter import _reexpand_dates_after_days_change
+    from tripmate.models import BasicInfo, TravelProfile
+
+    prof = TravelProfile(basic_info=BasicInfo(days=3, travel_dates=["2026-10-01", "2026-10-02", "2026-10-03"]))
+    # 用户同时给了新日期 → 不覆盖
+    updates = {"days": 2, "travel_dates": ["2026-11-01", "2026-11-02"]}
+    _reexpand_dates_after_days_change(updates, prof)
+    assert updates["travel_dates"] == ["2026-11-01", "2026-11-02"]
+    # 画像无既有日期 → 不造日期
+    prof2 = TravelProfile(basic_info=BasicInfo(days=3))
+    updates2 = {"days": 2}
+    _reexpand_dates_after_days_change(updates2, prof2)
+    assert "travel_dates" not in updates2

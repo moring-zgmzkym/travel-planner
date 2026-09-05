@@ -80,7 +80,9 @@ async def list_sessions() -> JSONResponse:
 @app.post("/api/sessions")
 async def create_session() -> JSONResponse:
     sid = f"s-{uuid.uuid4().hex[:8]}"
-    sessions[sid] = Session()
+    # 必须带 sid 构造：无 sid 的 Session 持久化全关，"新建对话"的数据会在重启后蒸发
+    # （2026-09-05 default 会话已修复，此入口漏网——同型事故不得复发）
+    sessions[sid] = Session(sid)
     return JSONResponse({"sid": sid, "title": _session_title(sessions[sid])})
 
 

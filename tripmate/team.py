@@ -1113,12 +1113,18 @@ class TeamRunner:
 
 
 def _changed_fields(changes) -> list[str]:
-    """changelog 条目 → 变更字段名清单（detail_info 的字段带分区前缀，与 FIELD_IMPACT 键对齐）。"""
+    """changelog 条目 → 变更字段名清单（与 planning.FIELD_IMPACT 键对齐）。
+
+    注意：FIELD_IMPACT 的键不带分区前缀（apply_* 写入的 field 本就是 "hotel.xxx" /
+    "party_size" 等裸键名），此前拼接 "detail_info." 前缀导致酒店/人数类变更永远
+    查不中映射表、被静默降级为"仅行程重排"（旧偏好不触发重查）。defaults_applied
+    是系统默认值记录而非用户意图变更，一并过滤。"""
     fields = []
     for e in changes:
-        f = f"{e.section}.{e.field}" if e.section == "detail_info" else e.field
-        if f not in fields:
-            fields.append(f)
+        f = e.field
+        if f == "defaults_applied" or f in fields:
+            continue
+        fields.append(f)
     return fields
 
 

@@ -16,6 +16,7 @@ FOOD_FALLBACK = 120   # 未收录城市餐饮日均值
 FIELD_IMPACT: dict[str, set[str]] = {
     "destination": {"guides", "tickets", "hotels", "weather", "itinerary"},   # 全量重跑
     "origin": {"tickets", "itinerary"},
+    "days": {"tickets", "hotels", "weather", "itinerary"},                    # 天数→晚数/日期全变（此前缺失：改天数不触发任何重查）
     "travel_dates": {"tickets", "hotels", "weather", "itinerary"},            # 车票+酒店+天气重查，攻略复用
     "travel_mode": {"tickets", "itinerary"},
     "date_text": {"tickets", "weather"},

@@ -31,6 +31,27 @@ DEFAULTS: dict[str, tuple[object, str]] = {
 REGION_ALIAS: dict[str, str] = {"陕南": "汉中", "陕西南部": "汉中", "陕南地区": "汉中"}
 
 
+def _reexpand_dates_after_days_change(basic_updates: dict, prof) -> None:
+    """用户只改天数、未给新日期时，按既有出发日重展开逐日序列（就地写入 basic_updates）。
+
+    否则天数与 travel_dates 口径漂移：酒店晚数/车票日期按旧序列查询，而日程按新天数排——
+    且 days 变更现已正确触发 tickets/hotels/weather 重查（FIELD_IMPACT 补 days），旧序列会被
+    当作"用户要的日期"再次使用。"""
+    if "days" not in basic_updates or "travel_dates" in basic_updates:
+        return
+    new_days = basic_updates.get("days")
+    if not isinstance(new_days, int) or new_days <= 0:
+        return
+    old_dates = prof.basic_info.travel_dates
+    if not old_dates:
+        return
+    from .mocks.data import expand_dates
+    try:
+        basic_updates["travel_dates"] = expand_dates(old_dates[0], new_days)
+    except (ValueError, TypeError):
+        pass  # 非法既有日期交给后续流程容错
+
+
 async def ensure_travel_dates(bb: Blackboard, bus: StatusBus) -> bool:
     """启动前兜底（问题 4）：出行时间段缺失时确定性写入默认"近期"并在草稿标注。
 
@@ -84,6 +105,7 @@ def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> Assista
                         basic_updates["travel_dates"] = expand_dates(dates[0], days)
             except ValueError:
                 pass  # 非法日期格式交给后续流程容错
+        _reexpand_dates_after_days_change(basic_updates, prof)
 
         # 区域型目的地解析（仅精确匹配 REGION_ALIAS 整词）：代表城市入 destination，区域表述留 special_needs
         dest = basic_updates.get("destination")
