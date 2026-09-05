@@ -112,7 +112,8 @@ async def query_weather(city: str, dates: list[str]) -> dict:
                 r.raise_for_status()
                 return r.json()
 
-            geo = await with_retry(_geo, retries=1, what="城市地理编码")
+            geo = await with_retry(_geo, retries=1, timeout_s=WeatherConfig.TIMEOUT_S,
+                                   what="城市地理编码")
             hits = geo.get("results") or []
             if not hits:
                 raise ServiceUnavailable(f"未找到城市「{city}」的坐标")
@@ -127,7 +128,8 @@ async def query_weather(city: str, dates: list[str]) -> dict:
                 r.raise_for_status()
                 return r.json()
 
-            fc = await with_retry(_forecast, retries=1, what="天气预报")
+            fc = await with_retry(_forecast, retries=1, timeout_s=WeatherConfig.TIMEOUT_S,
+                                  what="天气预报")
         daily = fc.get("daily") or {}
         by_date = {}
         for i, d in enumerate(daily.get("time", [])):
@@ -150,7 +152,9 @@ async def query_weather(city: str, dates: list[str]) -> dict:
                 **(info or {"day_text": "超出预报范围", "temp_min": None, "temp_max": None}),
             })
         return {"city": city, "source": "Open-Meteo（真实预报）", "reference_only": False, "days": days}
-    except (ServiceUnavailable, httpx.HTTPError, KeyError):
+    except (ServiceUnavailable, httpx.HTTPError, KeyError, ValueError):
+        # ValueError 覆盖 json.JSONDecodeError（对端返回 HTML 错误页/代理拦截页时
+        # r.json() 抛出）——此前漏接，护栏路径无兜底会炸穿整个阶段
         if not ALLOW_MOCK_FALLBACK:
             raise ServiceUnavailable("天气查询失败且不允许降级")
         return mock_weather(dates, city)

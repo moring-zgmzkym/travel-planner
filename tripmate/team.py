@@ -179,6 +179,9 @@ class TeamContext:
     run_id: str
     # 变更影响分析给出的通道复用开关（增量重跑：True=复用缓存不重查）
     reuse: dict[str, bool] = field(default_factory=dict)
+    # Planner submit_draft 连续失败计数（本地熔断：≥3 次直接落兜底草稿，
+    # 此前要白烧满 30 条消息 × 每轮 2 次 LLM 才由护栏兜底）
+    draft_failures: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -476,21 +479,24 @@ def make_planner_tools(ctx: TeamContext):
     async def submit_draft(draft_json: str) -> str:
         """提交行程草稿。draft_json：JSON 数组，每天
         {"date":"YYYY-MM-DD","morning":"...","afternoon":"...","evening":"...","spots":["..."]}。
-        系统校验天数/日期/必经景点/节奏并核算预算；校验失败返回错误清单，修正后重新提交。"""
+        系统校验天数/日期/必经景点/节奏并核算预算；校验失败返回错误清单，修正后重新提交。
+        连续失败 ≥3 次触发本地熔断：直接落确定性兜底草稿（与护栏同终态，提前止损）。"""
         prof: TravelProfile = ctx.bb.profile
         try:
             rows = json.loads(draft_json)
             assert isinstance(rows, list) and rows
         except Exception:
-            return _ok(status="error", error="draft_json 必须是非空 JSON 数组")
+            return await _draft_failure(ctx, _ok(status="error", error="draft_json 必须是非空 JSON 数组"))
         try:
             draft = Draft(days=[DraftDay(**r) for r in rows])
         except Exception as e:
-            return _ok(status="error", error=f"字段不符：{e}")
+            return await _draft_failure(ctx, _ok(status="error", error=f"字段不符：{e}"))
         errors = validate_draft(prof, draft)
         if errors:
-            return _ok(status="validation_failed", errors=errors,
-                       hint="请修正以上错误后重新调用 submit_draft")
+            return await _draft_failure(
+                ctx, _ok(status="validation_failed", errors=errors,
+                         hint="请修正以上错误后重新调用 submit_draft"))
+        ctx.draft_failures = 0
         budget = compute_budget(prof, draft)
         draft.budget_items = budget["items"]
         draft.budget_total = budget["total"]
@@ -516,6 +522,32 @@ def make_planner_tools(ctx: TeamContext):
         return _ok(status="requested", spots=spots, per_spot="1-2 张")
 
     return [submit_draft, request_images, deliver_final]
+
+
+async def _draft_failure(ctx: TeamContext, response: str) -> str:
+    """submit_draft 失败计数 + 本地熔断：连续 ≥3 次直接落确定性兜底草稿。
+
+    此前校验失败只回错误清单不推进，Planner 是唯一不被强制收敛的 speaker，
+    模型修不好时（如必经景点子串匹配无解）会连续 30 轮白烧 token 才由护栏兜底。
+    已有草稿（revise 轮）时不覆盖——与现状终态一致（保留旧草稿）。"""
+    ctx.draft_failures += 1
+    if ctx.draft_failures < 3 or ctx.bb.profile.draft:
+        return response
+    prof = ctx.bb.profile
+    draft = _fallback_draft(prof)
+    budget = compute_budget(prof, draft)
+    draft.budget_items = budget["items"]
+    draft.budget_total = budget["total"]
+    draft.warnings = budget["warnings"]
+    draft.notes = ([f"预算占用 {budget['occupancy']:.0%}"] if budget["occupancy"] else []) \
+        + ["草稿多次校验未通过，系统按经典路线兜底生成，可提出修改意见调整"]
+    await ctx.bb.write("draft", draft, "planner", "本地熔断：草稿连续校验失败，确定性兜底")
+    await ctx.bus.emit(AGENT_PLANNER,
+                       f"草稿多次校验未通过，已按经典路线生成兜底草稿（{len(draft.days)} 天）",
+                       "STATUS_DRAFT")
+    AUDIT.observation("TeamRunner", f"本地熔断：submit_draft 连续失败 {ctx.draft_failures} 次，落兜底草稿")
+    return _ok(status="fallback_written", day_count=len(draft.days),
+               note="草稿已按经典路线兜底生成，无需重试 submit_draft")
 
 
 async def _deliver_final(ctx: TeamContext) -> str:
@@ -621,7 +653,7 @@ class TeamRunner:
         self._task = asyncio.create_task(self._phase_loop("collect"))
         return {"status": "accepted", "run_id": self.run_id}
 
-    def submit_feedback(self, feedback: str, confirmed: bool) -> dict:
+    async def submit_feedback(self, feedback: str, confirmed: bool) -> dict:
         """草稿反馈路由：confirmed=True → finalize；否则 revise（≤3 轮，§4.5）。"""
         if not (self.bb.profile.draft):
             return {"status": "rejected", "reason": "当前没有待反馈的草稿"}
@@ -636,8 +668,12 @@ class TeamRunner:
                     "reason": f"草稿修改已达 {BudgetConfig.MAX_DRAFT_ROUNDS} 轮上限，请确认当前草稿或重新启动规划"}
         self._draft_rounds += 1
         self._awaiting_feedback = False
-        self.bb.profile.draft_feedback = DraftFeedback(
-            confirmed=False, feedback=feedback, rounds_used=self._draft_rounds)
+        # 走黑板协议（版本号 + changelog + 持久化）：此前直改活对象绕过全部协议，
+        # 服务重启丢反馈、修订轮数上限失效（内存与磁盘分叉）
+        await self.bb.write(
+            "draft_feedback",
+            DraftFeedback(confirmed=False, feedback=feedback, rounds_used=self._draft_rounds),
+            "system", f"用户草稿反馈（第 {self._draft_rounds} 轮）")
         self._task = asyncio.create_task(self._phase_loop("revise"))
         return {"status": "accepted", "phase": "revise", "round": self._draft_rounds}
 
@@ -817,29 +853,46 @@ class TeamRunner:
         basic, detail = prof.basic_info, prof.detail_info
         party = detail.party_size or basic.party_size or 1
 
+        # 护栏每个补齐块独立容错：单通道失败（如对端返回非 JSON）只降级该分区，
+        # 绝不让确定性兜底自身炸穿阶段（工具层内部已有 mock 降级，这里是最后防线）
         if not prof.guide_digest and basic.destination:
-            r = await search_guides(basic.destination, basic.date_text or "")
-            items = [GuideDigestItem(**d) for d in r["digest"]]
-            await self.bb.write("guide_digest", items, "researcher", "护栏补齐：攻略分区缺失")
-            await self.bus.emit("TeamRunner", "护栏：攻略分区已由确定性通道补齐", "STATUS_CHECKPOINT")
-            AUDIT.observation("TeamRunner", "guardrail 补齐 guide_digest")
+            try:
+                r = await search_guides(basic.destination, basic.date_text or "")
+                items = [GuideDigestItem(**d) for d in r["digest"]]
+                await self.bb.write("guide_digest", items, "researcher", "护栏补齐：攻略分区缺失")
+                await self.bus.emit("TeamRunner", "护栏：攻略分区已由确定性通道补齐", "STATUS_CHECKPOINT")
+                AUDIT.observation("TeamRunner", "guardrail 补齐 guide_digest")
+            except Exception as e:  # noqa: BLE001 — 护栏单块失败不拖垮阶段
+                AUDIT.observation("TeamRunner", f"护栏补齐攻略分区失败（跳过）：{type(e).__name__}: {e}")
+                await self.bus.emit("TeamRunner", f"护栏补齐攻略分区失败，行程将缺攻略参考：{type(e).__name__}", "STATUS_ERROR")
         if not prof.tickets and basic.origin and basic.destination:
-            tr = await query_tickets(basic.origin, basic.destination,
-                                     basic.travel_dates or [], basic.travel_mode or "高铁")
-            tickets = [TicketCandidate(**t) for t in score_tickets(tr["candidates"], party)]
-            await self.bb.write("tickets", tickets, "booking", "护栏补齐：车票分区缺失")
-            await self.bus.emit("TeamRunner", "护栏：车票候选已由确定性通道补齐", "STATUS_CHECKPOINT")
+            try:
+                tr = await query_tickets(basic.origin, basic.destination,
+                                         basic.travel_dates or [], basic.travel_mode or "高铁")
+                tickets = [TicketCandidate(**t) for t in score_tickets(tr["candidates"], party)]
+                await self.bb.write("tickets", tickets, "booking", "护栏补齐：车票分区缺失")
+                await self.bus.emit("TeamRunner", "护栏：车票候选已由确定性通道补齐", "STATUS_CHECKPOINT")
+            except Exception as e:  # noqa: BLE001
+                AUDIT.observation("TeamRunner", f"护栏补齐车票分区失败（跳过）：{type(e).__name__}: {e}")
+                await self.bus.emit("TeamRunner", f"护栏补齐车票分区失败，本次无车票候选：{type(e).__name__}", "STATUS_ERROR")
         if not prof.hotels and basic.destination:
-            hr = await query_hotels(basic.destination, detail.hotel.location_pref,
-                                    detail.hotel.price_range, basic.budget,
-                                    dates=basic.travel_dates or [])
-            hotels = [HotelCandidate(**h) for h in score_hotels(hr["candidates"], detail.hotel.price_range)]
-            await self.bb.write("hotels", hotels, "booking", "护栏补齐：酒店分区缺失")
-            await self.bus.emit("TeamRunner", "护栏：酒店候选已由确定性通道补齐", "STATUS_CHECKPOINT")
+            try:
+                hr = await query_hotels(basic.destination, detail.hotel.location_pref,
+                                        detail.hotel.price_range, basic.budget,
+                                        dates=basic.travel_dates or [])
+                hotels = [HotelCandidate(**h) for h in score_hotels(hr["candidates"], detail.hotel.price_range)]
+                await self.bb.write("hotels", hotels, "booking", "护栏补齐：酒店分区缺失")
+                await self.bus.emit("TeamRunner", "护栏：酒店候选已由确定性通道补齐", "STATUS_CHECKPOINT")
+            except Exception as e:  # noqa: BLE001
+                AUDIT.observation("TeamRunner", f"护栏补齐酒店分区失败（跳过）：{type(e).__name__}: {e}")
+                await self.bus.emit("TeamRunner", f"护栏补齐酒店分区失败，本次无酒店候选：{type(e).__name__}", "STATUS_ERROR")
         if not prof.weather and basic.destination:
-            w = await query_weather(basic.destination,
-                                    basic.travel_dates or near_term_dates(basic.date_text, basic.days or 3))
-            await self.bb.write("weather", w, "booking", "护栏补齐：天气分区缺失")
+            try:
+                w = await query_weather(basic.destination,
+                                        basic.travel_dates or near_term_dates(basic.date_text, basic.days or 3))
+                await self.bb.write("weather", w, "booking", "护栏补齐：天气分区缺失")
+            except Exception as e:  # noqa: BLE001
+                AUDIT.observation("TeamRunner", f"护栏补齐天气分区失败（跳过）：{type(e).__name__}: {e}")
         # 攻略笔记提炼（PDF 景点简介/美食模块数据源）：限时+容忍解析，失败静默留空走回退。
         # 幂等：本轮已尝试过（含失败）不再重试，避免阶段过渡反复触发 LLM 调用。
         if (prof.guide_digest and basic.destination

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..config import ALLOW_MOCK_FALLBACK
+from ..config import ALLOW_MOCK_FALLBACK, McpConfig
 from ..mocks.data import (
     mock_flight_tickets,
     mock_transport_estimate_km,
@@ -45,7 +45,9 @@ async def query_tickets(origin: str, destination: str, dates: list[str], mode: s
                  "toStation": destination, "departure_date": date, "format": "json"},
                 what="12306 车票查询")
 
-        raw = await with_retry(_query, retries=1, what="12306 车票查询")
+        # timeout_s 显式传 MCP 90s 硬上限：默认 30s 会砍掉 npx 冷启动等正常慢调用
+        raw = await with_retry(_query, retries=1, timeout_s=McpConfig.CALL_TIMEOUT_S,
+                               what="12306 车票查询")
         candidates = _normalize_12306(raw, origin, destination, date)
         if candidates:
             return {"mode": "real", "candidates": candidates, "transport_kind": "train"}

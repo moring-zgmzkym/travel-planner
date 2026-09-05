@@ -18,6 +18,10 @@ logger = logging.getLogger("tripmate.tools.resilience")
 
 # 被抛弃的挂死任务登记表：持有强引用防 GC，done 回调自动出册并消费异常
 _ABANDONED: set[asyncio.Task] = set()
+# 登记量告警阈值：MCP stdio 被抛弃任务的清理（mcp 2.1.1 自带"关 stdin→等待→Job Object
+# 硬杀进程树"且在 cancellation shield 内）通常仍会走完，仅清理协程本身永久卡死才真泄漏；
+# 超阈值说明出现系统性挂死，需人工介入
+_ABANDONED_WARN = 8
 
 
 class ServiceUnavailable(RuntimeError):
@@ -42,15 +46,21 @@ def _consume_task_result(task: asyncio.Task) -> None:
 
 def _register_abandoned(task: asyncio.Task) -> None:
     _ABANDONED.add(task)
+    if len(_ABANDONED) >= _ABANDONED_WARN:
+        logger.warning("被抛弃的挂死任务已达 %d 个（疑似外部通道系统性挂死，请检查 MCP/网络）", len(_ABANDONED))
     task.add_done_callback(_ABANDONED.discard)
     task.add_done_callback(_consume_task_result)
 
 
-async def cancel_with_grace(task: asyncio.Task, grace_s: float = 0.5) -> bool:
+async def cancel_with_grace(task: asyncio.Task, grace_s: float = 5.0) -> bool:
     """取消任务并最多等 grace_s 让其自行清理；仍未退出则抛弃（返回 True）。
 
     抛弃 = 不再等待其清理完成（挂死的 aclose 可能永远不结束），任务留登记表直至真正结束。
-    若等待宽限期间本协程又被取消（如用户停止）：登记后透传取消。"""
+    若等待宽限期间本协程又被取消（如用户停止）：登记后透传取消。
+
+    grace_s 默认 0.5→5s（2026-09-05）：MCP stdio 的清理序列（关 stdin → 等待退出 →
+    Job Object 硬杀进程树）本身需要数秒，0.5s 几乎必然把"正在正常收尾"误判为挂死；
+    抛弃路径不阻塞调用方主流程，多等几秒只影响罕见的超时分支。"""
     task.cancel()
     try:
         _, pending = await asyncio.wait({task}, timeout=grace_s)

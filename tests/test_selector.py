@@ -64,9 +64,10 @@ def test_draft_rounds_limit():
     async def main():
         runner._phase_loop = noop  # type: ignore[method-assign]
         for _ in range(3):
-            assert runner.submit_feedback("修改意见", confirmed=False)["status"] == "accepted"
+            # submit_feedback 现为 async（走黑板协议落盘）
+            assert (await runner.submit_feedback("修改意见", confirmed=False))["status"] == "accepted"
             await asyncio.sleep(0)  # 让 noop 后台任务完成（模拟阶段结束）
         # 第 4 次修改被拒（≤3 轮，§4.5）
-        assert runner.submit_feedback("还想改", confirmed=False)["status"] == "rejected"
+        assert (await runner.submit_feedback("还想改", confirmed=False))["status"] == "rejected"
 
     asyncio.run(main())

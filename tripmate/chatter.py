@@ -175,7 +175,7 @@ def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> Assista
     async def submit_draft_feedback(feedback: str, confirmed: bool) -> str:
         """提交草稿反馈。用户提出修改意见 → feedback=意见原文, confirmed=false；
         用户明确确认草稿 → confirmed=true（feedback 可为空）。"""
-        receipt = runner.submit_feedback(feedback=feedback, confirmed=confirmed)
+        receipt = await runner.submit_feedback(feedback=feedback, confirmed=confirmed)
         return json.dumps(receipt, ensure_ascii=False)
 
     agent = AssistantAgent(

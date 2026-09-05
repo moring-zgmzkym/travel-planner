@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from urllib.parse import urlsplit
@@ -31,15 +32,23 @@ async def enrich_hotels(hotels: list, city: str, top: int = 3) -> None:
         return
     async with httpx.AsyncClient(timeout=_IMG_TIMEOUT_S, headers=_IMG_HEADERS,
                                  follow_redirects=True) as client:
-        for h in targets:
-            try:
-                h.image_path = await _hotel_image(client, h.name, city)
-            except Exception:  # noqa: BLE001 — 宣传图失败不影响评价摘要
-                h.image_path = ""
-            try:
-                h.review_digest = await _hotel_review(client, h.name, city)
-            except Exception:  # noqa: BLE001 — 评价摘要失败不影响宣传图
-                h.review_digest = ""
+        # 3 家 ×（图+评价）串行最坏 ~60s 且占住收割路径；sem(2) 控并发防限流
+        sem = asyncio.Semaphore(2)
+
+        async def _enrich_one(h) -> None:
+            async with sem:
+                try:
+                    h.image_path = await _hotel_image(client, h.name, city)
+                except Exception as e:  # noqa: BLE001 — 宣传图失败不影响评价摘要
+                    h.image_path = ""
+                    logger.warning("酒店宣传图获取失败「%s」（%s: %s）", h.name, type(e).__name__, e)
+                try:
+                    h.review_digest = await _hotel_review(client, h.name, city)
+                except Exception as e:  # noqa: BLE001 — 评价摘要失败不影响宣传图
+                    h.review_digest = ""
+                    logger.warning("酒店评价摘要获取失败「%s」（%s: %s）", h.name, type(e).__name__, e)
+
+        await asyncio.gather(*(_enrich_one(h) for h in targets))
 
 
 async def _hotel_image(client: httpx.AsyncClient, name: str, city: str) -> str:
@@ -111,7 +120,9 @@ async def query_hotels(city: str, location_pref: str | None, price_range: list[f
                 # "hotel"+"search" 且在 list_tools 里排在它前面，宽泛关键词会误中
                 return await session.call(("searchhotels",), args, what="酒店查询")
 
-            raw = await with_retry(_q, retries=2, what="酒店查询")
+            # timeout_s 必须显式传：with_retry 默认 30s 会先于 MCP 90s 硬上限到期，
+            # 把仍在正常执行的调用连协程砍掉（npx 冷启动必挂，CALL_TIMEOUT_S 形同虚设）
+            raw = await with_retry(_q, retries=1, timeout_s=McpConfig.CALL_TIMEOUT_S, what="酒店查询")
             candidates = _normalize_hotels(raw, nights=nights)
             if not candidates:
                 raise ServiceUnavailable("酒店 MCP 返回为空")
@@ -144,7 +155,8 @@ async def query_hotels(city: str, location_pref: str | None, price_range: list[f
         p = c["price_per_night"]
         if (lo and p < lo) or (hi and p > hi):
             continue
-        c["distance_km"] = await _distance_km(city, c["name"], location_pref, hotel_pos=pos, lm_pos=lm_pos)
+        c["distance_km"], c["distance_estimated"] = await _distance_km(
+            city, c["name"], location_pref, hotel_pos=pos, lm_pos=lm_pos)
         filtered.append(c)
     if not filtered:  # 区间内无候选时回退全量并提示
         filtered = candidates
@@ -161,7 +173,7 @@ async def _amap_poi(session, city: str, keyword: str) -> tuple[float, float] | N
         lambda: session.call(("text", "search"),
                              {"keywords": keyword, "city": city, "citylimit": "true"},
                              what=f"高德 POI 查询（{keyword}）"),
-        retries=1, what="高德 POI 查询")
+        retries=1, timeout_s=McpConfig.CALL_TIMEOUT_S, what="高德 POI 查询")
     pois = (raw or {}).get("pois") if isinstance(raw, dict) else None
     if not pois and isinstance(raw, dict):
         pois = (raw.get("data", {}) or {}).get("pois")
@@ -177,7 +189,7 @@ async def _amap_poi(session, city: str, keyword: str) -> tuple[float, float] | N
         raw_d = await with_retry(
             lambda pid=pid: session.call(("detail",), {"id": pid},
                                          what=f"高德 POI 详情（{keyword}）"),
-            retries=1, what="高德 POI 详情")
+            retries=1, timeout_s=McpConfig.CALL_TIMEOUT_S, what="高德 POI 详情")
         detail = raw_d if isinstance(raw_d, dict) else {}
         loc = str(detail.get("location", "") or "")
         if "," in loc:
@@ -188,9 +200,10 @@ async def _amap_poi(session, city: str, keyword: str) -> tuple[float, float] | N
 
 async def _distance_km(city: str, hotel_name: str, landmark: str | None,
                        hotel_pos: tuple[float, float] | None = None,
-                       lm_pos: tuple[float, float] | None = None) -> float:
+                       lm_pos: tuple[float, float] | None = None) -> tuple[float, bool]:
     """酒店距地标距离：优先用 MCP 自带的酒店坐标（省一次 POI 查询），高德补地标坐标 + 哈弗辛（真实）；
-    降级为确定性参考值。坐标口径 (lon, lat)。lm_pos 由调用方传入（query_hotels 整轮只查一次地标）。"""
+    降级为确定性参考值。返回 (距离, 是否估算)；坐标口径 (lon, lat)。
+    lm_pos 由调用方传入（query_hotels 整轮只查一次地标）。"""
     lm = landmark or kb_for_city(city)["landmark"]
     if McpConfig.AMAP_API_KEY:
         try:
@@ -200,12 +213,13 @@ async def _distance_km(city: str, hotel_name: str, landmark: str | None,
             if lm_pos is None:
                 lm_pos = await _amap_poi(session, city, lm)
             if hotel_pos and lm_pos:
-                return round(_haversine(hotel_pos, lm_pos), 1)
-        except (ServiceUnavailable, ValueError):
-            pass
+                return round(_haversine(hotel_pos, lm_pos), 1), False
+        except (ServiceUnavailable, ValueError) as e:
+            # 此前静默吞掉：用户无从知晓距离是编的（配合 estimated 标注才成立）
+            logger.warning("高德距离计算失败「%s」（%s: %s），降级为估算参考值", hotel_name,
+                           type(e).__name__, e)
     # 降级：确定性参考距离
-    import hashlib
-    return round(0.3 + int(hashlib.md5(hotel_name.encode()).hexdigest(), 16) % 200 / 100, 1)
+    return round(0.3 + int(hashlib.md5(hotel_name.encode()).hexdigest(), 16) % 200 / 100, 1), True
 
 
 def _haversine(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -246,6 +260,7 @@ def _normalize_dida(rows: list, nights: int) -> list[dict]:
             "price_per_night": round(total / max(1, nights), 1),
             "distance_km": 1.0,
             "rating": rating if rating > 0 else 4.5,
+            "rating_estimated": rating <= 0,   # Dida 无评分时的 4.5 是兜底值，不得冒充实评
             "link": str(r.get("bookingUrl") or ""),
             "source": "Dida 酒店 MCP（实时数据）",
             "reference_only": False,
@@ -283,13 +298,17 @@ def _normalize_hotels(raw: object, nights: int = 1) -> list[dict]:
         except ValueError:
             continue
         rating = pick("rating", "score", "star")
+        rating_estimated = False
         try:
             rating_f = float(rating) if rating is not None else 4.5
+            rating_estimated = rating is None
         except (ValueError, TypeError):
             rating_f = 4.5
+            rating_estimated = True
         out.append({
             "name": str(name), "price_per_night": price_f,
             "distance_km": 1.0, "rating": rating_f,
+            "rating_estimated": rating_estimated,
             "link": str(pick("url", "link") or "https://hotels.ctrip.com"),
             "source": "酒店 MCP（实时数据）", "reference_only": False,
         })
@@ -297,11 +316,16 @@ def _normalize_hotels(raw: object, nights: int = 1) -> list[dict]:
 
 
 def score_and_select(candidates: list[dict], price_range: list[float] | None) -> list[dict]:
-    """酒店打分勾选（§4.4）：score = 0.4×价格契合度 + 0.3×距离 + 0.3×评分；top1 自动勾选。"""
+    """酒店打分勾选（§4.4）：score = 0.4×价格契合度 + 0.3×距离 + 0.3×评分；top1 自动勾选。
+
+    估算字段（distance_estimated/rating_estimated）不参与 min/max 归一、按中性 0.5 权重计——
+    此前哈希伪距离/兜底评分与真实值同池归一，混入"实时数据"影响排序（2026-09-05）。"""
     if not candidates:
         return []
-    dists = [c["distance_km"] for c in candidates] or [1]
-    ratings = [c["rating"] for c in candidates] or [4.5]
+    real_dists = [c["distance_km"] for c in candidates if not c.get("distance_estimated")]
+    real_ratings = [c["rating"] for c in candidates if not c.get("rating_estimated")]
+    dists = real_dists or [c["distance_km"] for c in candidates] or [1]
+    ratings = real_ratings or [c["rating"] for c in candidates] or [4.5]
     d_min, d_max = min(dists), max(dists)
     r_min, r_max = min(ratings), max(ratings)
     lo, hi = (price_range or [0, 0]) or [0, 0]
@@ -320,12 +344,16 @@ def score_and_select(candidates: list[dict], price_range: list[float] | None) ->
             fit = max(0.2, 1 - abs(c["price_per_night"] - mid) / max(mid, 1))
         else:
             fit = 0.8
-        s = 0.4 * fit + 0.3 * norm(c["distance_km"], d_min, d_max, invert=True) \
-            + 0.3 * norm(c["rating"], r_min, r_max, invert=False)
+        d_comp = 0.5 if c.get("distance_estimated") else norm(c["distance_km"], d_min, d_max, invert=True)
+        r_comp = 0.5 if c.get("rating_estimated") else norm(c["rating"], r_min, r_max, invert=False)
+        s = 0.4 * fit + 0.3 * d_comp + 0.3 * r_comp
         c["score"] = round(s, 3)
     ranked = sorted(candidates, key=lambda c: -c["score"])
     top = ranked[0]
     top["selected"] = True
     top["reason"] = (f"综合评分最高（{top['score']}）：{top['price_per_night']} 元/晚，距地标 {top['distance_km']}km，"
                      f"评分 {top['rating']}")
+    est = [label for flag, label in ((top.get("distance_estimated"), "距离"), (top.get("rating_estimated"), "评分")) if flag]
+    if est:
+        top["reason"] += f"（{'/'.join(est)}为估算参考值）"
     return ranked

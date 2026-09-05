@@ -102,6 +102,10 @@ class HotelCandidate(BaseModel):
     reference_only: bool = False
     image_path: str = ""       # 宣传图本地路径（需求 6：勾选酒店补充，失败留空）
     review_digest: str = ""    # 住客评价摘要（Tavily 检索，失败留空）
+    # 降级估算标注（2026-09-05）：AMAP 失败时距离为哈希参考值、Dida 无评分时评分为
+    # 兜底值——此前混在"实时数据"里参与打分与展示，用户无从分辨（不静默原则的例外已消除）
+    distance_estimated: bool = False
+    rating_estimated: bool = False
 
 
 class ImageItem(BaseModel):

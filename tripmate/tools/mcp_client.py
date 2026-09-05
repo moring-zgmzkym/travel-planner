@@ -125,7 +125,15 @@ class McpSession:
 
 
 def _extract_content(result: Any) -> Any:
-    """MCP CallToolResult → 纯数据（text JSON 优先）。"""
+    """MCP CallToolResult → 纯数据（text JSON 优先）。
+
+    isError=True 时错误文本此前被包成 {"text": ...} 当正常数据返回，上层解析不出
+    候选后只报"返回为空"——真实报错被吞。改为抛 ServiceUnavailable，进既有逐通道
+    降级链（notice 带原始错误）。"""
+    if getattr(result, "isError", False):
+        err_texts = [getattr(c, "text", "") for c in (getattr(result, "content", None) or [])
+                     if getattr(c, "type", "") == "text"]
+        raise ServiceUnavailable("MCP 工具执行报错：" + ("；".join(t for t in err_texts if t) or "（无错误详情）")[:500])
     content = getattr(result, "content", None) or []
     texts = [getattr(c, "text", "") for c in content if getattr(c, "type", "") == "text"]
     if not texts:
