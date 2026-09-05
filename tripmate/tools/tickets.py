@@ -51,11 +51,11 @@ async def query_tickets(origin: str, destination: str, dates: list[str], mode: s
         candidates = _normalize_12306(raw, origin, destination, date)
         if candidates:
             return {"mode": "real", "candidates": candidates, "transport_kind": "train"}
-        raise ServiceUnavailable("12306-MCP 返回为空")
+        raise ServiceUnavailable("12306-MCP 未返回可售班次（常见原因：出行日期超出预售期（约 15 天）或该日期无直达班次）")
     except ServiceUnavailable as e:
         if not ALLOW_MOCK_FALLBACK:
             raise
-        return {"mode": "mock", "notice": f"12306 通道暂不可用（{e}），已切换模拟班次表（参考值，§7 降级方案）",
+        return {"mode": "mock", "notice": f"12306 未查到可售班次（{e}），已切换模拟班次表（参考值，§7 降级方案）",
                 "candidates": mock_train_tickets(origin, destination, date), "transport_kind": "train"}
 
 

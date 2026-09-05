@@ -47,7 +47,11 @@ _MODEL_INFO = ModelInfo(
 
 # 主模型失败后的冷却期（秒）：期内直接走次级，避免每次调用都白等一次超时；
 # 冷却过后重新探测主模型，恢复即切回。
+# 2026-09-05 e2e 实测（主通道故障夜）：固定 120s 使每一轮都重新探测主模型、
+# 白付一次 150s 超时——冷却改为随连续失败次数指数增长（120→240→480→600 封顶），
+# 主模型恢复即复位。免费次级通道可用性优先于主模型质量。
 _PRIMARY_COOLDOWN_S = 120.0
+_PRIMARY_COOLDOWN_MAX_S = 600.0
 
 # 连接类错误（APIConnectionError）的同通道快速重试延迟（秒）。
 # 实测（2026-09-04 09:52）：主备两通道同轮各报一次 APIConnectionError（瞬时网络/VPN 抖动），
@@ -99,12 +103,17 @@ class _FallbackClient(ChatCompletionClient, Component[_FallbackConfig]):
         self._secondary = secondary
         self._on_primary = True
         self._primary_failed_at = 0.0
+        self._primary_fail_streak = 0   # 主模型连续失败次数（自适应冷却：×2 递增，封顶）
 
     def _label(self, idx: int) -> str:
         return "主模型" if idx == 0 else "次级模型"
 
+    def _cooldown(self) -> float:
+        return min(_PRIMARY_COOLDOWN_S * (2 ** max(0, self._primary_fail_streak - 1)),
+                   _PRIMARY_COOLDOWN_MAX_S)
+
     def _order(self) -> list[int]:
-        if self._on_primary or time.monotonic() - self._primary_failed_at > _PRIMARY_COOLDOWN_S:
+        if self._on_primary or time.monotonic() - self._primary_failed_at > self._cooldown():
             return [0, 1]
         return [1, 0]
 
@@ -112,17 +121,20 @@ class _FallbackClient(ChatCompletionClient, Component[_FallbackConfig]):
         return self._primary if idx == 0 else self._secondary
 
     def _note_success(self, idx: int) -> None:
-        if not self._on_primary and idx == 0:
-            logger.info("主模型恢复，切回主模型")
+        if idx == 0:
+            self._primary_fail_streak = 0
+            if not self._on_primary:
+                logger.info("主模型恢复，切回主模型")
         self._on_primary = idx == 0
 
     def _note_failure(self, idx: int, exc: Exception) -> None:
         if idx == 0:
+            self._primary_fail_streak += 1
             self._primary_failed_at = time.monotonic()
             self._on_primary = False
             logger.warning(
                 "主模型调用失败（%s: %s），本次及 %ss 内改用次级模型重试",
-                type(exc).__name__, exc, int(_PRIMARY_COOLDOWN_S),
+                type(exc).__name__, exc, int(self._cooldown()),
             )
 
     async def create(

@@ -10,7 +10,7 @@ import pytest
 from autogen_core.models import RequestUsage, UserMessage
 from autogen_ext.models.replay import ReplayChatCompletionClient
 
-from tripmate.llm import _PRIMARY_COOLDOWN_S, _FallbackClient
+from tripmate.llm import _PRIMARY_COOLDOWN_MAX_S, _PRIMARY_COOLDOWN_S, _FallbackClient
 
 _MSG = lambda: UserMessage(content="测试问题", source="user")  # noqa: E731
 
@@ -101,3 +101,26 @@ def test_total_usage_aggregates_both_clients():
     )
     got = client.total_usage()
     assert (got.prompt_tokens, got.completion_tokens) == (expect.prompt_tokens, expect.completion_tokens)
+
+
+def test_primary_cooldown_grows_and_resets(monkeypatch):
+    """自适应冷却回归（2026-09-05 e2e 修复）：主通道故障夜每轮固定 120s 后重探测、
+    白付一次 150s 超时——连续失败（冷却到期后的重探测失败）时冷却 ×2 递增
+    （600s 封顶），成功即复位。单次失败的既有行为不变
+    （test_primary_recovers_after_cooldown 锁定）。"""
+    primary = _FlakyClient("x", fail_times=999)
+    client = _FallbackClient(primary, ReplayChatCompletionClient(["次级回复"] * 10))
+    asyncio.run(client.create([_MSG()]))                    # 首次失败：streak=1
+    assert client._cooldown() == _PRIMARY_COOLDOWN_S
+    import time as _time
+    real_monotonic = _time.monotonic
+    offset = {"v": 0.0}
+    monkeypatch.setattr(_time, "monotonic", lambda: real_monotonic() + offset["v"])
+    # 真实时序：每次冷却到期 → 重探测主模型 → 再次失败 → 冷却翻倍
+    for mult in (2, 3, 4, 4):
+        offset["v"] += _PRIMARY_COOLDOWN_S * (2 ** (mult - 2)) + 1  # 跳出当前冷却期
+        asyncio.run(client.create([_MSG()]))                # 冷却后的重探测再次失败
+        assert client._cooldown() == min(_PRIMARY_COOLDOWN_S * (2 ** (mult - 1)),
+                                         _PRIMARY_COOLDOWN_MAX_S)
+    client._note_success(0)                                 # 主模型恢复 → 复位
+    assert client._cooldown() == _PRIMARY_COOLDOWN_S

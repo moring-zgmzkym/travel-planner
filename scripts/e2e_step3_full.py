@@ -13,33 +13,61 @@ USER_INPUT = ("帮我规划十一成都 3 天游，10 月 1 号从上海出发�
               "必去大熊猫基地。")
 
 
+async def wait_event_liveness(s: Session, target: set[str], *,
+                              total_timeout_s: int = 3000, idle_timeout_s: int = 180,
+                              label: str = "事件"):
+    """活性感知的团队事件等待（2026-09-05 修复）：
+
+    此前 wait_draft 固定 1500s——主通道故障夜（每轮先探测主模型 150s 超时再走次级）
+    检查点重跑会吃满预算误报"草稿未生成"。现改为双通道等待：
+    - 总上限 3000s（硬顶）；
+    - 总线静默 180s（无任何心跳/状态事件）才判定真挂死快速失败；
+    - 团队事件命中 target → 成功返回；error → 终止。
+    """
+    loop = asyncio.get_running_loop()
+    sub = s.bus.subscribe()
+    start = last_activity = loop.time()
+    try:
+        while True:
+            now = loop.time()
+            if now - start > total_timeout_s:
+                print(f"  [watch] {label} 总超时（{total_timeout_s}s）")
+                return None
+            idle_left = idle_timeout_s - (now - last_activity)
+            total_left = total_timeout_s - (now - start)
+            team_ev = asyncio.create_task(s.team_events.get())
+            bus_ev = asyncio.create_task(sub.get())
+            done, pending = await asyncio.wait({team_ev, bus_ev},
+                                               timeout=max(0.0, min(idle_left, total_left)),
+                                               return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            if not done:
+                print(f"  [watch] {label} 总线静默 {idle_timeout_s}s，判定真挂死")
+                return None
+            for t in done:
+                if t is team_ev:
+                    kind, data = item = t.result()
+                    if kind in target:
+                        return kind, data
+                    if kind == "error":
+                        print("  [watch] 团队错误:", data)
+                        return None
+                else:
+                    last_activity = loop.time()  # 心跳/状态事件 = 活着，继续等
+    finally:
+        s.bus.unsubscribe(sub)
+
+
 async def wait_draft(s: Session, timeout_s: int = 1500) -> bool:
-    """等待草稿就绪（阶段循环 + 护栏结束的准确信号；1500s 预算：含主备故障切换与中途修改检查点增量重跑（2026-08-31 慢通道实测需 >600s））。"""
-    while True:
-        try:
-            kind, data = await asyncio.wait_for(s.team_events.get(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            print("  [watch] 超时")
-            return False
-        if kind == "draft_ready":
-            return True
-        if kind == "error":
-            print("  [watch] 团队错误:", data)
-            return False
+    """等待草稿就绪（活性感知：主备切换与检查点增量重跑不再误判超时）。"""
+    got = await wait_event_liveness(s, {"draft_ready"}, label="草稿")
+    return got is not None
 
 
 async def wait_final(s: Session, timeout_s: int = 1500) -> bool:
-    while True:
-        try:
-            kind, data = await asyncio.wait_for(s.team_events.get(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            print("  [watch] 超时")
-            return False
-        if kind == "completed":
-            return True
-        if kind == "error":
-            print("  [watch] 团队错误:", data)
-            return False
+    got = await wait_event_liveness(s, {"completed"}, label="定稿")
+    return got is not None
 
 
 async def main() -> None:
