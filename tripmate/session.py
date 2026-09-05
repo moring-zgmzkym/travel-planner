@@ -36,14 +36,22 @@ _START_INTENT = re.compile(
 # 反馈提交意图断言：草稿待反馈期模型可能宣布"已把修改意见转给团队"而不真正调用
 # submit_draft_feedback（2026-08-31 完整流程实测两种变体："把这条修改意见转给规划团队"、
 # "我来提交给规划团队"——宣布后团队闲置，修订流程卡死）。
+# 2026-09-05 e2e 实测第三种变体：模型把调用文本化为 "、submit_draft_feedback(confirm=false,...)"
+# （前导顿号 + 函数调用形态）——加入裸工具名分支，使专用反馈 nudge 接管。
 _FEEDBACK_INTENT = re.compile(
     r"(?:转给|提交给|反馈给|转达给)(?:规划)?团队"
-    r"|(?:修改意见|反馈|意见)[^。！？]{0,6}(?:已)?(?:提交|转达)(?:给)?(?:规划)?团队")
+    r"|(?:修改意见|反馈|意见)[^。！？]{0,6}(?:已)?(?:提交|转达)(?:给)?(?:规划)?团队"
+    r"|submit_draft_feedback\b")
 
 
 def _missed_tool_call(reply: str) -> bool:
-    """检测 provider 把工具调用文本化的失败模式（裸工具名或工具标记泄漏）。"""
+    """检测 provider 把工具调用序列化成文本的失败模式（裸工具名或工具标记泄漏）。
+
+    2026-09-05 e2e 实测变体：前导标点（"、"等）后跟裸工具名/函数调用形态——
+    先剥离前导标点再匹配，否则 "、submit_draft_feedback(...)" 永远漏检，
+    反馈永不真正提交、修订流程卡死。"""
     t = (reply or "").strip()
+    t = re.sub(r"^[、，,。．.\s:：;；!！?？]+", "", t)
     return bool(_BARE_TOOL.match(t) or _TOOL_MARKUP.search(t))
 
 

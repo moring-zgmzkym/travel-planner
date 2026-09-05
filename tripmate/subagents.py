@@ -59,7 +59,7 @@ async def run_channel_subagent(channel: str, instruction: str,
     """
     client = model_client if model_client is not None else get_model_client()
 
-    async def _tool() -> str:
+    async def query_channel_data() -> str:
         data = await query()
         return json.dumps(data, ensure_ascii=False, default=str)
 
@@ -68,7 +68,7 @@ async def run_channel_subagent(channel: str, instruction: str,
             agent = AssistantAgent(
                 name=f"{channel}_worker",
                 model_client=client,
-                tools=[_tool],
+                tools=[query_channel_data],
                 system_message=SUBAGENT_PROMPT.format(channel=channel),
                 reflect_on_tool_use=False,   # 工具结果直接回传，省一轮反思 LLM 调用
             )

@@ -208,7 +208,11 @@ class PersistentMcpSession:
     - 调用超时/失败 → 重置会话引用（下次调用重新握手；外层 with_retry 负责重试）；
       被抛弃任务的清理继续在后台执行（mcp SDK 自带进程树终止）。
     - 同会话调用按构造即串行（车票/酒店/天气各自独立会话），不加锁避免
-      "抛弃的挂死调用永久持锁"死锁。"""
+      "抛弃的挂死调用永久持锁"死锁。
+    - actor 模式（2026-09-05 e2e 实测修复）：传输栈由专属 supervisor 任务持有——
+      栈在该任务内进入与退出。此前栈在 JobBoard 任务内进入、在 end_mcp_pool 里退出，
+      触发 anyio "cancel scope in a different task" 异常，干净关闭失败、stdio 子进程
+      残留。close() 只向 supervisor 发停止信号并在其任务内完成 aclose。"""
 
     def __init__(self, transport: str, command: str = "", url: str = "",
                  headers: dict[str, str] | None = None, name: str = "") -> None:
@@ -221,11 +225,15 @@ class PersistentMcpSession:
         self._session = None
         self._tools = None
         self._inflight: asyncio.Task | None = None
+        self._supervisor: asyncio.Task | None = None
+        self._ready: asyncio.Event | None = None
+        self._stop: asyncio.Event | None = None
+        self._open_error: BaseException | None = None
 
-    async def _ensure_open(self) -> None:
-        if self._session is not None:
-            return
+    async def _supervise_open(self) -> None:
+        """专属持有任务：栈在本任务内进入；收到停止信号后在同任务内 aclose。"""
         stack = AsyncExitStack()
+        self._stack = stack
         try:
             if self._transport == "stdio":
                 parts = self._command.split()
@@ -245,31 +253,75 @@ class PersistentMcpSession:
             session = ClientSession(read, write)
             await stack.enter_async_context(session)
             await session.initialize()
-            tools = await session.list_tools()
-        except BaseException:
+            self._tools = (await session.list_tools()).tools
+            self._session = session
+        except Exception as e:  # noqa: BLE001 — 开启失败：记录并唤醒等待者
+            self._open_error = e
+            self._stack = None
             try:
                 await stack.aclose()
             except Exception:  # noqa: BLE001
                 pass
-            raise
-        self._stack, self._session, self._tools = stack, session, tools.tools
-
-    def _reset(self) -> None:
-        """仅清引用（栈的清理归属在途/被抛弃任务自身），下次调用重新握手。"""
-        self._stack = None
+        finally:
+            if self._ready is not None:
+                self._ready.set()
+        if self._session is None:
+            return
+        # 保持存活直至 close/_reset 请求停止；aclose 在"本任务"内执行（亲和性正确）
+        await self._stop.wait()
         self._session = None
         self._tools = None
+        self._stack = None
+        try:
+            await stack.aclose()
+        except Exception as e:  # noqa: BLE001 — 关闭失败仅记日志（mcp 清理含进程树终止）
+            logger.warning("持久 MCP 会话 %s 关闭异常（%s: %s）", self.name, type(e).__name__, e)
+
+    async def _ensure_open(self) -> None:
+        if self._session is not None:
+            return
+        self._open_error = None
+        self._ready = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._supervisor = asyncio.create_task(self._supervise_open())
+        await self._ready.wait()
+        if self._open_error is not None:
+            self._supervisor = None
+            raise self._open_error
+
+    def _reset(self) -> None:
+        """失败/超时后重置：请求 supervisor 退出（栈在其自身任务内干净关闭），
+        下次调用重新握手。不等待退出（被抛弃任务的清理继续在后台执行）。"""
+        self._session = None
+        self._tools = None
+        self._stack = None
+        self._supervisor = None
+        if self._stop is not None:
+            self._stop.set()
 
     async def close(self) -> None:
-        """阶段结束关闭：先宽限终止在途调用，再关闭传输（幂等）。"""
+        """阶段结束关闭：先宽限终止在途调用，再通知 supervisor 在其任务内关闭传输（幂等）。"""
         inflight, self._inflight = self._inflight, None
         if inflight is not None and not inflight.done():
             await cancel_with_grace(inflight)
-        stack, self._stack = self._stack, None
+        sup, self._supervisor = self._supervisor, None
         self._session = None
         self._tools = None
-        if stack is not None:
-            await stack.aclose()
+        self._stack = None
+        if sup is None or sup.done():
+            return
+        if self._stop is not None:
+            self._stop.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(sup), timeout=10.0)
+        except asyncio.TimeoutError:
+            register_abandoned(sup)
+            logger.warning("持久 MCP 会话 %s 关闭超时（10s），已抛弃清理任务", self.name)
+        except asyncio.CancelledError:
+            register_abandoned(sup)
+            raise
+        except Exception as e:  # noqa: BLE001 — 单会话关闭失败不影响其他通道
+            logger.warning("持久 MCP 会话 %s 关闭异常（%s: %s）", self.name, type(e).__name__, e)
 
     async def call(self, keywords: tuple[str, ...], args: dict[str, Any], what: str) -> Any:
         """复用会话调用工具；找不到/失败抛 ServiceUnavailable。接口与 McpSession.call 一致。"""

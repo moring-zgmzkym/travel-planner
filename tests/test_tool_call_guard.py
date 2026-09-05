@@ -26,3 +26,23 @@ def test_clean_reply_strips_new_markers():
     dirty = "submit_draft_feedback<tool_sep:abc> <arg_key:abc>confirmed true"
     cleaned = clean_reply(dirty)
     assert "<tool_sep" not in cleaned and "<arg_key" not in cleaned
+
+
+def test_serialized_tool_call_with_leading_punctuation_detected():
+    """2026-09-05 e2e 实测新变体：前导顿号 + 函数调用形态的文本化输出必须命中，
+    否则反馈永不真正提交、修订流程卡死（本次运行事故的回归）。"""
+    assert _missed_tool_call(
+        "、submit_draft_feedback(confirm=false, feedback=\"第2天调整为都江堰一日游\")")
+    assert _missed_tool_call("，start_planning")
+    assert _missed_tool_call("。get_travel_profile")
+    # 正常中文回复仍不误报
+    assert not _missed_tool_call("好的，已确认草稿。")
+    assert not _missed_tool_call("您的行程已生成，请查收。")
+
+
+def test_feedback_intent_matches_textualized_call():
+    """反馈意图断言覆盖文本化调用形态（专用 nudge 接管）。"""
+    from tripmate.session import _FEEDBACK_INTENT
+    assert _FEEDBACK_INTENT.search('submit_draft_feedback(confirm=false, feedback="x")')
+    assert _FEEDBACK_INTENT.search("把这条修改意见提交给规划团队")
+    assert not _FEEDBACK_INTENT.search("今天天气不错")

@@ -17,10 +17,10 @@ _USAGE = RequestUsage(prompt_tokens=10, completion_tokens=10)
 
 
 def _tool_call_client(n: int = 2):
-    """n 次都返回"调用 _tool 工具"的模型响应。"""
+    """n 次都返回"调用 query_channel_data 工具"的模型响应。"""
     return ReplayChatCompletionClient([
         CreateResult(finish_reason="function_calls",
-                     content=[FunctionCall(id=str(i), name="_tool", arguments="{}")],
+                     content=[FunctionCall(id=str(i), name="query_channel_data", arguments="{}")],
                      usage=_USAGE, cached=False)
         for i in range(n)])
 

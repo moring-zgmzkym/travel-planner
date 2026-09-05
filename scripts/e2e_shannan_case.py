@@ -70,7 +70,7 @@ async def main() -> None:
         # 诊断用旁路：hy3-free 通道会把工具调用文本化（<tool_sep:...>）导致确认丢失，
         # 此处直接调用 runner 确认，用于单独验证 配图→PDF 下游流水线。
         print("[旁路] 直接调用 runner.submit_feedback(confirmed=True)，不经过 Chatter")
-        receipt = s.runner.submit_feedback(feedback="", confirmed=True)
+        receipt = await s.runner.submit_feedback(feedback="", confirmed=True)
         print("回执:", receipt)
     else:
         reply = await s.handle_user_message("确认，就这样")
