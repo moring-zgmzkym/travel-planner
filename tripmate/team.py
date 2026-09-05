@@ -37,6 +37,7 @@ from .tools.resilience import ServiceUnavailable, cancel_with_grace
 from .tools.search import search_city_covers, search_guides, search_images
 from .tools.tickets import query_tickets, score_and_select as score_tickets
 from .tools.weather import near_term_dates, query_weather
+from .subagents import run_channel_subagent
 
 AGENT_PROC = "InformationProcessor"
 AGENT_RES = "Researcher"
@@ -227,6 +228,12 @@ class TeamContext:
     # 此前要白烧满 30 条消息 × 每轮 2 次 LLM 才由护栏兜底）
     draft_failures: int = 0
 
+    def check_run_budget(self) -> None:
+        """收割点补检熔断（修复 #13 阶段三配套）：subagent 的 LLM 消耗不经群聊
+        逐消息检查（在后台任务里跑）。runner 为 None（测试桩）时跳过。"""
+        if self.runner is not None and self.runner._usage_baseline is not None:
+            check_budget(self.runner._usage_baseline)
+
 
 # ---------------------------------------------------------------------------
 # 工具集（各 Agent 的 Action；Observation 为返回字符串，写入黑板分区）
@@ -244,11 +251,16 @@ def make_researcher_tools(ctx: TeamContext):
         dest = prof.basic_info.destination or ""
         month = prof.basic_info.date_text or ""
         style = " ".join(prof.basic_info.style or [])
-        await ctx.bus.emit(AGENT_RES, f"攻略搜索中…（{dest}｜7 路专题并行：站点/美食/避坑/路线/景点）", "STATUS_COLLECT")
-        r = await search_guides(dest, month, style_hint=style)
-        tag = "降级参考值" if r["mode"] == "mock" else "实时"
-        await ctx.bus.emit(AGENT_RES, f"攻略搜索完成：{len(r['digest'])} 份来源（{tag}）", "STATUS_COLLECT")
-        return r
+
+        async def _query() -> dict:
+            await ctx.bus.emit(AGENT_RES, f"攻略搜索中…（{dest}｜7 路专题并行：站点/美食/避坑/路线/景点）", "STATUS_COLLECT")
+            r = await search_guides(dest, month, style_hint=style)
+            tag = "降级参考值" if r["mode"] == "mock" else "实时"
+            await ctx.bus.emit(AGENT_RES, f"攻略搜索完成：{len(r['digest'])} 份来源（{tag}）", "STATUS_COLLECT")
+            return r
+
+        return await run_channel_subagent(
+            "guides", f"查询目的地「{dest}」的旅行攻略（月份/主题：{month} {style}）。调用工具即完成。", _query)
 
     async def start_guide_search() -> str:
         """启动攻略搜索任务（小红书/马蜂窝/百度三路并行）。无参数：画像从共享黑板读取。
@@ -278,6 +290,7 @@ def make_researcher_tools(ctx: TeamContext):
             ctx.jobs.submit("guides", _guide_job())
         try:
             r = await ctx.jobs.collect("guides")
+            ctx.check_run_budget()  # subagent 的 LLM 消耗不经群聊逐消息检查，收割点补检
         except TokenBudgetExceeded:
             raise  # 熔断不得被降级链吞掉（否则要拖到下一条消息才生效）
         except Exception as exc:  # noqa: BLE001 — 收割失败降级，攻略分区交由护栏补齐（2026-09-04 加固）
@@ -350,34 +363,52 @@ def make_booking_tools(ctx: TeamContext):
     async def _ticket_job() -> dict:
         prof: TravelProfile = ctx.bb.profile
         basic = prof.basic_info
-        await ctx.bus.emit(AGENT_MCP, f"车票查询中…（{basic.origin}→{basic.destination}｜{basic.travel_mode}）", "STATUS_MCP")
-        r = await query_tickets(basic.origin or "", basic.destination or "",
-                                basic.travel_dates or [], basic.travel_mode or "高铁")
-        tag = "已查到班次" if r["candidates"] else "无候选"
-        await ctx.bus.emit(AGENT_MCP, f"车票查询完成：{tag}（{'降级参考值' if r['mode'] == 'mock' else 'MCP 实时'}）", "STATUS_MCP")
-        return r
+
+        async def _query() -> dict:
+            await ctx.bus.emit(AGENT_MCP, f"车票查询中…（{basic.origin}→{basic.destination}｜{basic.travel_mode}）", "STATUS_MCP")
+            r = await query_tickets(basic.origin or "", basic.destination or "",
+                                    basic.travel_dates or [], basic.travel_mode or "高铁")
+            tag = "已查到班次" if r["candidates"] else "无候选"
+            await ctx.bus.emit(AGENT_MCP, f"车票查询完成：{tag}（{'降级参考值' if r['mode'] == 'mock' else 'MCP 实时'}）", "STATUS_MCP")
+            return r
+
+        return await run_channel_subagent(
+            "tickets",
+            f"查询 {basic.origin or ''}→{basic.destination or ''} 的{basic.travel_mode or '高铁'}车票。调用工具即完成。",
+            _query)
 
     async def _hotel_job() -> dict:
         prof: TravelProfile = ctx.bb.profile
         basic, detail = prof.basic_info, prof.detail_info
-        await ctx.bus.emit(AGENT_MCP, f"酒店查询中…（{basic.destination}｜{detail.hotel.location_pref or '市中心'}）", "STATUS_MCP")
-        r = await query_hotels(basic.destination or "", detail.hotel.location_pref,
-                               detail.hotel.price_range, basic.budget,
-                               dates=basic.travel_dates or [])
-        await ctx.bus.emit(AGENT_MCP, f"酒店查询完成：{len(r['candidates'])} 家候选", "STATUS_MCP")
-        return r
+
+        async def _query() -> dict:
+            await ctx.bus.emit(AGENT_MCP, f"酒店查询中…（{basic.destination}｜{detail.hotel.location_pref or '市中心'}）", "STATUS_MCP")
+            r = await query_hotels(basic.destination or "", detail.hotel.location_pref,
+                                   detail.hotel.price_range, basic.budget,
+                                   dates=basic.travel_dates or [])
+            await ctx.bus.emit(AGENT_MCP, f"酒店查询完成：{len(r['candidates'])} 家候选", "STATUS_MCP")
+            return r
+
+        return await run_channel_subagent(
+            "hotels", f"查询「{basic.destination or ''}」的酒店候选（偏好：{detail.hotel.location_pref or '市中心'}）。调用工具即完成。",
+            _query)
 
     async def _weather_job() -> dict:
         prof: TravelProfile = ctx.bb.profile
         basic = prof.basic_info
-        await ctx.bus.emit(AGENT_MCP, f"天气查询中…（{basic.destination}）", "STATUS_MCP")
-        # 兜底日期：travel_dates 为空（如「9月1日-7日中选3天」区间/「近期」）时按预报窗推近端日期，
-        # 区间完全在预报窗外则仍为空（维持"不编造"现状）
-        r = await query_weather(basic.destination or "",
-                                basic.travel_dates or near_term_dates(basic.date_text, basic.days or 3))
-        tag = "降级参考值" if r.get("reference_only") else "实时预报"
-        await ctx.bus.emit(AGENT_MCP, f"天气查询完成（{tag}）", "STATUS_MCP")
-        return r
+
+        async def _query() -> dict:
+            await ctx.bus.emit(AGENT_MCP, f"天气查询中…（{basic.destination}）", "STATUS_MCP")
+            # 兜底日期：travel_dates 为空（如「9月1日-7日中选3天」区间/「近期」）时按预报窗推近端日期，
+            # 区间完全在预报窗外则仍为空（维持"不编造"现状）
+            r = await query_weather(basic.destination or "",
+                                    basic.travel_dates or near_term_dates(basic.date_text, basic.days or 3))
+            tag = "降级参考值" if r.get("reference_only") else "实时预报"
+            await ctx.bus.emit(AGENT_MCP, f"天气查询完成（{tag}）", "STATUS_MCP")
+            return r
+
+        return await run_channel_subagent(
+            "weather", f"查询「{basic.destination or ''}」出行期间天气预报。调用工具即完成。", _query)
 
     async def start_booking_queries() -> str:
         """启动车票/酒店/天气三路并行查询（无参数：查询参数从共享黑板读取）。
@@ -476,6 +507,7 @@ def make_booking_tools(ctx: TeamContext):
         elif not weather:
             weather = {}
         ctx.state.step = "PROC_SUMMARIZE"
+        ctx.check_run_budget()
         sel_t = next((t for t in tickets if t.selected), None)
         sel_h = next((h for h in hotels if h.selected), None)
         return _ok(

@@ -157,3 +157,11 @@ PLANNER_PROMPT = """你是旅行规划团队的计划规划 Agent（Planner）�
 def team_system_prompt(desc: str) -> str:
     """团队内 Agent 的公共开头（信息隔离约束 §3.5）。"""
     return desc + "\n\n【团队信息隔离】你不直接面向用户；只处理群聊内部消息与共享黑板数据；任何需要用户确认的事项由聊天 Agent 转述。"
+
+# 阶段三：JobBoard 任务体的 subagent 系统提示（单工具、无参、调用即完成）
+SUBAGENT_PROMPT = (
+    "你是 TripMate 规划团队的数据查询工人（subagent，通道：{channel}）。\n"
+    "你只有一个工具，它没有任何参数（查询所需数据全部来自共享画像/黑板），"
+    "调用后会返回结构化查询结果 JSON。\n"
+    "你的唯一职责：立即调用该工具一次。不要询问、不要解释、不要编造数据、不要重复调用。"
+)
