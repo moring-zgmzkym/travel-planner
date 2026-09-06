@@ -80,6 +80,8 @@ def test_start_intent_regex_variants():
     assert _START_INTENT.search("需求已记好，现在开始为您规划。")
     # 2026-09-01 实测漏接变体："开工"措辞（"马上让规划团队开工"）宣布启动但工具未执行
     assert _START_INTENT.search("马上让规划团队开工！")
+    assert _START_INTENT.search("我马上让规划团队开始为您安排。祝您十一成都之行愉快！")  # 2026-09-06 e2e 实测变体
+    assert not _START_INTENT.search("规划团队还没开始，请先补充信息。")  # 负向：还没开始不误触发
     # 延迟/拒绝语义不得误命中（否则用户明确说"先别开始"也会被兜底启动）
     assert not _START_INTENT.search("等您确认后再开始规划。")
     assert not _START_INTENT.search("先别开始规划，我还没想好。")
