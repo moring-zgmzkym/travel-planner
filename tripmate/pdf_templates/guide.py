@@ -641,6 +641,7 @@ class GuideTemplate(BaseTripTemplate):
             for i, day in enumerate(profile.draft.days):
                 block = self._day_block(i, day, profile)
                 story.append(KeepTogether(block + [Spacer(1, 8)]))
+                story.extend(self.route_day_block(profile, i))   # 路线表插在天卡之后（不进 KeepTogether）
         else:
             story.append(Paragraph("暂无逐日草稿数据", st("gnodraft", 9, color=self.GRAY)))
         story.append(Spacer(1, 4))

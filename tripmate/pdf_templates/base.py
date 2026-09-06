@@ -424,6 +424,104 @@ class BaseTripTemplate:
         t.setStyle(TableStyle(cmds))
         return t
 
+    # ---- 每日路线（route 分区积木：站点徽章/地址 + 导航链接 + 二维码 + 段间连接行）----
+
+    def _qr_flowable(self, url: str, size_mm: float = 14):
+        """导航链接二维码（reportlab 自带 qr，无新依赖；实测 reportlab 5.0.1 中 QrCodeWidget
+        需装入 Drawing 并 scale 到目标尺寸）。失败返回 None——调用方省略二维码，仅留链接。"""
+        try:
+            from reportlab.graphics.barcode import qr as qr_mod
+            from reportlab.graphics.shapes import Drawing
+            widget = qr_mod.QrCodeWidget(url)
+            bounds = widget.getBounds()
+            side = max(bounds[2] - bounds[0], bounds[3] - bounds[1]) or 1.0
+            pt = size_mm * mm
+            d = Drawing(pt, pt)
+            d.add(widget)
+            d.scale(pt / side, pt / side)
+            return d
+        except Exception:  # noqa: BLE001 — QR 失败不阻塞 PDF
+            return None
+
+    def route_day_block(self, profile: TravelProfile, day_index: int) -> list:
+        """第 day_index 天（0 基）的每日路线表（route 分区，与 draft.days 同序）。
+        返回 Flowables 列表；分区缺失/当日无站点返回 []（路线功能降级时版块整体省略）。
+        调用约定：插在逐日行程对应天版块之后、不进 KeepTogether——整块超高会被强拆产生大空白。"""
+        routes = profile.routes or []
+        if day_index >= len(routes):
+            return []
+        rd = routes[day_index]
+        if not rd.stops:
+            return []
+        st_head = self.style("rthead", 10, bold=True, color=colors.white)
+        st_name = self.style("rtname", 10.5, bold=True)
+        st_addr = self.style("rtaddr", 8.5, color=self.GRAY, leading=11)
+        st_link = self.style("rtlink", 8.5)
+        st_conn = self.style("rtconn", 8.5, color=self.GRAY, leading=12)
+        badge_map = {"meal": "🍜", "hotel": "🏨", "spot": "🏛"}
+        badge_txt = {"meal": "餐", "hotel": "宿", "spot": "景"}
+
+        rows: list = [[Paragraph(esc(f"DAY {day_index + 1} 路线 · 全天约 {rd.total_km:g} km"), st_head), "", ""]]
+        cmds = [
+            ("SPAN", (0, 0), (-1, 0)),
+            ("BACKGROUND", (0, 0), (-1, 0), self.PRIMARY),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOX", (0, 0), (-1, -1), 0.6, self.HAIRLINE),
+            ("TOPPADDING", (0, 0), (-1, -1), 3.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ]
+        r = 1
+        for i, s in enumerate(rd.stops):
+            icon = emoji_png(badge_map.get(s.kind, "🏛"), 72)
+            badge = (Image(icon, width=6 * mm, height=6 * mm) if icon else
+                     Paragraph(esc(badge_txt.get(s.kind, "站")),
+                               self.style(f"rtb{r}", 8, color=self.GRAY, alignment=TA_CENTER)))
+            label = (f"{s.meal}·" if s.kind == "meal" and s.meal else "") + s.name
+            mid = [Paragraph(esc(label), st_name)]
+            if s.address:
+                mid.append(Paragraph(esc(s.address), st_addr))
+            if s.note:
+                mid.append(Paragraph(esc("※ " + s.note),
+                                     self.style(f"rtnote{r}", 8, color=self.WARN, leading=10)))
+            nav: list = []
+            if s.nav_url:
+                nav.append(Paragraph(
+                    f'<a href="{esc(s.nav_url)}" color="{self.PRIMARY_HEX}"><u>导航→</u></a>', st_link))
+                qr = self._qr_flowable(s.nav_url)
+                if qr is not None:
+                    nav.append(qr)
+            elif s.reference_only:
+                nav.append(Paragraph(esc("参考值"), self.style(f"rtref{r}", 7.5, color=self.GRAY)))
+            rows.append([badge, mid, nav or ""])
+            cmds += [("BACKGROUND", (0, r), (0, r), self.LIGHT),
+                     ("LINEABOVE", (0, r), (-1, r), 0.4, self.HAIRLINE)]
+            r += 1
+            # 段间行只属于"有下一站"的站点（正常不变量 len(segments)=len(stops)-1，
+            # 对畸形数据防御：末站之后不渲染悬空连接行）
+            if i < len(rd.stops) - 1 and i < len(rd.segments):
+                seg = rd.segments[i]
+                if seg.mode:
+                    dist = f"{seg.distance_m / 1000:g}km" if seg.distance_m >= 1000 \
+                        else (f"{seg.distance_m}m" if seg.distance_m else "")
+                    parts = [x for x in (dist, f"{seg.duration_min}min") if x]
+                    txt = f"↓ {seg.mode} " + " / ".join(parts) + ("（估算）" if seg.reference_only else "")
+                else:
+                    txt = "↓ 距离未知（端点缺坐标）"
+                # SPAN 行内容必须放在起始格（第 0 列），其余格在跨列后不渲染（实测踩坑）
+                rows.append([Paragraph(esc(txt), st_conn), "", ""])
+                cmds += [("SPAN", (0, r), (-1, r)),
+                         ("BACKGROUND", (0, r), (-1, r), self.BG_LIGHT)]
+                r += 1
+        tail = ([f"点评：{rd.summary}"] if rd.summary else []) + list(rd.warnings)
+        if tail:
+            rows.append([[Paragraph(esc("※ " + t), self.style(f"rtw{r}", 8.5, color=self.WARN, leading=12))
+                          for t in tail], "", ""])
+            cmds.append(("SPAN", (0, r), (-1, r)))
+            r += 1
+        t = Table(rows, colWidths=[10 * mm, CONTENT_W - 34 * mm, 24 * mm])
+        t.setStyle(TableStyle(cmds))
+        return [t]
+
     # ---- 封面（主题渐变底 + 实拍条；子类可覆写）----
 
     def cover_base(self) -> PILImage.Image:

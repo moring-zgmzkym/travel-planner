@@ -18,6 +18,53 @@ def test_speaker_map_protocol():
     assert speakers == [AGENT_PROC, AGENT_RES, AGENT_MCP, AGENT_RES, AGENT_MCP, AGENT_PROC, AGENT_PLANNER]
 
 
+def test_speaker_map_finalize_route():
+    # finalize 流水线：配图 → 路线启动/收割（均 BookingButler）→ 定稿
+    from tripmate.team import SPEAKER
+    assert SPEAKER["RES_IMG"] == AGENT_RES
+    assert SPEAKER["MCP_ROUTE"] == AGENT_MCP and SPEAKER["ROUTE_COLLECT"] == AGENT_MCP
+    assert SPEAKER["PLAN_PDF"] == AGENT_PLANNER
+
+
+class _Msg:
+    def __init__(self, src, txt):
+        self.source = src
+
+    def to_text(self):
+        return self._txt
+
+
+def _msg(src, txt):
+    m = _Msg(src, txt)
+    m._txt = txt
+    return m
+
+
+def test_selector_finalize_route_flow():
+    """finalize 阶段步骤映射 + 三条空转兜底（配图/路线启动/路线收割）。"""
+    runner = TeamRunner(Blackboard(), StatusBus())
+    runner._state = TeamState(phase="finalize", step="PLAN_IMGREQ")
+    assert runner._selector([]) == AGENT_PLANNER
+    for step, speaker in (("RES_IMG", AGENT_RES), ("MCP_ROUTE", AGENT_MCP),
+                          ("ROUTE_COLLECT", AGENT_MCP), ("PLAN_PDF", AGENT_PLANNER)):
+        runner._state.step = step
+        assert runner._selector([]) == speaker
+
+    # 空转兜底 1：配图无 IMAGE_RESULT → MCP_ROUTE（图片由护栏兜底）
+    runner._state.step = "RES_IMG"
+    runner._state.last_speaker, runner._state.consecutive = AGENT_RES, 2
+    assert runner._selector([_msg(AGENT_RES, "配图失败")]) == AGENT_MCP
+    assert runner._state.step == "MCP_ROUTE"
+    # 空转兜底 2：路线启动无 ROUTE_STARTED → ROUTE_COLLECT
+    runner._state.last_speaker, runner._state.consecutive = AGENT_MCP, 2
+    assert runner._selector([_msg(AGENT_MCP, "收到")]) == AGENT_MCP
+    assert runner._state.step == "ROUTE_COLLECT"
+    # 空转兜底 3：路线收割无 ROUTE_RESULT → PLAN_PDF（路线由保险/护栏兜底）
+    runner._state.last_speaker, runner._state.consecutive = AGENT_MCP, 2
+    assert runner._selector([_msg(AGENT_MCP, "还没好")]) == AGENT_PLANNER
+    assert runner._state.step == "PLAN_PDF"
+
+
 def test_selector_consecutive_cap():
     runner = TeamRunner(Blackboard(), StatusBus())
     runner._state = TeamState(phase="collect", step="RES_START")  # 一直选 Researcher

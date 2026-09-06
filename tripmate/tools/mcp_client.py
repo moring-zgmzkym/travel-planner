@@ -105,7 +105,9 @@ class McpSession:
     async def _call_impl(self, keywords: tuple[str, ...], args: dict[str, Any], what: str) -> Any:
         stack, session = await self._open()
         try:
-            tools = await session.list_tools()
+            # .tools 必不可少：ListToolsResult 是 pydantic 模型，直接迭代产出 (字段名, 值) 元组，
+            # _match_tool 里 t.name 会抛 AttributeError（短会话路径曾因此 100% 失败的潜伏缺陷）
+            tools = (await session.list_tools()).tools
             matched = _match_tool(tools, keywords, what)
             call_args = _filter_args(matched, args)
             result = await session.call_tool(matched.name, call_args)
@@ -119,8 +121,11 @@ def _extract_content(result: Any) -> Any:
 
     isError=True 时错误文本此前被包成 {"text": ...} 当正常数据返回，上层解析不出
     候选后只报"返回为空"——真实报错被吞。改为抛 ServiceUnavailable，进既有逐通道
-    降级链（notice 带原始错误）。"""
-    if getattr(result, "isError", False):
+    降级链（notice 带原始错误）。
+    属性名兼容（2026-09-06）：mcp 2.1.1 的字段是 is_error，isError 恒 getattr 缺省
+    False——错误检测曾因此从未生效（错误文本当数据返回）。"""
+    is_err = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
+    if is_err:
         err_texts = [getattr(c, "text", "") for c in (getattr(result, "content", None) or [])
                      if getattr(c, "type", "") == "text"]
         raise ServiceUnavailable("MCP 工具执行报错：" + ("；".join(t for t in err_texts if t) or "（无错误详情）")[:500])

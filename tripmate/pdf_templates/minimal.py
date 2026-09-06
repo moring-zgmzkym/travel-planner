@@ -287,6 +287,7 @@ class MinimalTemplate(BaseTripTemplate):
                     ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
                 ]))
                 story.append(KeepTogether(t))
+                story.extend(self.route_day_block(profile, i))   # 路线表插在天块之后（不进 KeepTogether）
                 story.append(Spacer(1, 5))
         story.append(Spacer(1, 2))
 

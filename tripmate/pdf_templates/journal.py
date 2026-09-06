@@ -345,6 +345,7 @@ class JournalTemplate(BaseTripTemplate):
         if profile.draft:
             for i, day in enumerate(profile.draft.days):
                 story.append(KeepTogether([self._day_card(i, day, profile), Spacer(1, 6)]))
+                story.extend(self.route_day_block(profile, i))   # 路线表插在天卡之后（不进 KeepTogether）
         story.append(Spacer(1, 2))
 
         # ---- 肆 预算核算 ----

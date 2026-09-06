@@ -53,6 +53,9 @@ CHATTER_PROMPT = """你是 TripMate 的聊天 Agent（Chatter），系统唯一�
 
 【反馈路由】
 - 用户对草稿提出修改意见 → 调用 submit_draft_feedback(feedback=修改意见, confirmed=false)。
+- **修改意见常同时含可抽取字段（如"第2天换成X"既是草稿反馈又涉及必去景点）：先 save_travel_info 更新字段，
+  再在同一轮内调用 submit_draft_feedback(feedback=用户原话, confirmed=false)——两个动作必须都做，缺一不可；
+  只更新信息不提交反馈 = 修改意见丢失，草稿将永远停在待确认状态（2026-09-06 实测事故）。**
 - 用户明确确认草稿（"确认/可以/没问题/就这个/定稿"类表述）→ 调用 submit_draft_feedback(confirmed=true)。
 - 用户补充/修改旅行信息（预算、酒店偏好等，而非草稿修改）→ 调用 save_travel_info 更新。
 - 用户要求停止/取消规划（"停止/取消/别规划了"）→ 调用 stop_planning，并告知已收集的数据会保留。
@@ -123,6 +126,12 @@ BOOKING_PROMPT = """你是旅行规划团队的 MCP 专项 Agent（BookingButler
    - 天气要点；每项标注数据来源是实时（MCP）还是参考值（降级）。
    - 若系统提示"车票复用（变更影响分析）"，在回复中明确说明车票未重查、复用缓存。
 
+【路线规划（仅定稿阶段；收到 IMAGE_RESULT 或系统提示图片已就绪时执行）】
+第 3 步：调用 start_route_queries 启动每日路线计算（景点坐标/段间交通/饭点餐厅/导航链接），
+       然后简短回复「ROUTE_STARTED」。
+第 4 步：你获得的**下一次发言权就是点名**——立即调用 collect_route_results，
+       拿到每日路线后，回复以「ROUTE_RESULT」开头：简述每天路线要点（站数/总距离/饭点餐厅）与点评。
+
 【硬约束】系统不接触支付（§4.4 支付引导）：只输出订单参数与直达链接；价格/班次一律以工具返回为准，不编造。""" + REACT_RULES
 
 
@@ -145,8 +154,9 @@ PLANNER_PROMPT = """你是旅行规划团队的计划规划 Agent（Planner）�
    回复同样以「DRAFT_READY」开头并说明本轮修改点。
 3. 收到 DRAFT_CONFIRMED（或系统提示草稿已确认）：调用 request_images（系统按草稿清单发起图片请求）；你回复以「IMAGE_REQUEST」开头，
    列出需要配图的景点清单与每景点 1-2 张的要求。
-4. 收到 IMAGE_RESULT（或系统提示图片已就绪）：调用 deliver_final 生成最终 PDF；回复以「FINAL_PDF」开头：
-   PDF 已生成（路径）+ 订单清单要点（已勾选车票/酒店与总价）+ 数据来源说明。
+4. 收到 IMAGE_RESULT（或系统提示图片已就绪）：待 MCP 专项 Agent 完成每日路线规划（ROUTE_RESULT）后，
+   调用 deliver_final 生成最终 PDF；回复以「FINAL_PDF」开头：
+   PDF 已生成（路径）+ 订单清单要点（已勾选车票/酒店与总价）+ 每日路线已含在 PDF 中 + 数据来源说明。
 
 【触发规则（重要）】轮到你发言本身就是系统点名——不要以"没收到某条标记消息"为由拒绝行动。
 对照黑板状态判断该做哪一步：有 PLAN_REQUEST/plan_input 而无草稿→提交草稿；有用户反馈→修订；草稿已确认→request_images；图片已就绪→deliver_final。

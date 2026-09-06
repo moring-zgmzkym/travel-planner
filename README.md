@@ -39,8 +39,8 @@ python run.py          # 或 Windows 双击 run.bat
         │ 调用 Tool（§3.3 契约）
    Planning Team（SelectorGroupChat 四 Agent 对等协同，§3.4）
         InformationProcessor ─ Researcher
-             │               ─ BookingButler
-             └── Planner（草稿 → 图片 → PDF）
+             │               ─ BookingButler（购票/酒店/天气 MCP 专项；定稿阶段二次上台跑路线规划 subagent）
+             └── Planner（草稿 → 图片 → 路线 → PDF）
         │
    共享黑板 TravelProfile（版本号 + changelog + 写入串行化，§3.6）
         │
@@ -55,7 +55,7 @@ python run.py          # 或 Windows 双击 run.bat
 | `tripmate/team.py` | 四 Agent 工具集 + selector 状态机 + TeamRunner（阶段/检查点/增量重跑/护栏） |
 | `tripmate/chatter.py` | 聊天 Agent（§4.1） |
 | `tripmate/llm.py` | 模型客户端工厂：主备自动故障切换（主模型失败切次级、冷却后自动切回）+ token 成本控制 |
-| `tripmate/tools/` | 搜索、图片、MCP 客户端基座、车票/酒店/天气适配层 |
+| `tripmate/tools/` | 搜索、图片、MCP 客户端基座、车票/酒店/天气适配层、路线规划适配层（route 通道：每日景点串联/段间交通/饭点餐厅/导航链接+二维码，deadline 总预算护栏） |
 | `tripmate/planning.py` | 变更影响分析（§5.3）、预算核算（§4.5）、草稿校验（可单测纯逻辑） |
 | `tripmate/pdf_gen.py` | PDF 生成入口：按模板名从注册表分发（weasyprint 在 Windows 缺 GTK，按企划书备选方案采用 reportlab） |
 | `tripmate/pdf_templates/` | 固定模板库：公共积木基类 + 多风格版式（经典旅行手册/慢游图文路书/极简黑白/卡片式/暖色休闲/手账风），前端可选路书样式 |

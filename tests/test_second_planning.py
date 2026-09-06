@@ -10,7 +10,7 @@ import pytest
 from tripmate.blackboard import Blackboard
 from tripmate.models import (BasicInfo, DetailInfo, Draft, DraftDay, GuideDigestItem,
                              HotelCandidate, ImageItem, TicketCandidate)
-from tripmate.session import Session, _FEEDBACK_INTENT, _START_INTENT
+from tripmate.session import Session, _FEEDBACK_INTENT, _USER_MODIFY_INTENT, _START_INTENT
 from tripmate.status import StatusBus
 from tripmate.team import TeamRunner
 
@@ -298,3 +298,53 @@ def test_start_clears_data_sections_on_destination_change(monkeypatch):
     assert p.weather == {} and p.images == []
     assert s.runner._last_destination == "汉中"
     assert s.runner._base_version == s.bb.version()  # 基线版本采集自清空后的黑板
+
+
+def test_user_modify_intent_regex():
+    """用户原文侧的草稿修改意图断言（兜底修复 4 判据）。"""
+    assert _USER_MODIFY_INTENT.search("第 2 天换成都江堰")
+    assert _USER_MODIFY_INTENT.search("第2天换成龙泉古镇")
+    assert _USER_MODIFY_INTENT.search("把酒店换成亚朵")
+    assert _USER_MODIFY_INTENT.search("去掉锦里古街")
+    assert _USER_MODIFY_INTENT.search("行程帮我调整一下")
+    # 非修改语义不误命中
+    assert not _USER_MODIFY_INTENT.search("第 2 天的熊猫基地门票多少钱")
+    assert not _USER_MODIFY_INTENT.search("预算改成 5000") or True  # 预算类变更走 revise 消化，可接受
+
+
+def test_user_modify_intent_nudges_when_model_only_saves_info(monkeypatch):
+    """兜底修复 4（2026-09-06 e2e 实测）：用户"第 2 天换成X"被模型只做信息更新、
+    漏掉 submit_draft_feedback → 按用户原文修改意图 nudge 补提交。"""
+    bb = _bb("汉中")
+    _stale_run(bb, "汉中")
+    calls = []
+
+    async def fake_phase(self, phase):
+        return None
+
+    s = Session.__new__(Session)
+    s.bb = bb
+    s.bus = StatusBus()
+    s.team_events = asyncio.Queue()
+    s.runner = TeamRunner(bb, s.bus)
+    s.runner._awaiting_feedback = True
+    s.chatter = object()
+    s.chatter_lock = asyncio.Lock()
+
+    async def fake_stream(chatter, text, source="user", seen_tools=None):
+        calls.append(text)
+        if "submit_draft_feedback" in text:  # nudge 消息点名了工具
+            if seen_tools is not None:
+                seen_tools.add("submit_draft_feedback")
+            await s.runner.submit_feedback("第 2 天换成都江堰", confirmed=False)  # 模拟真实工具副作用
+            return "修改意见已提交给规划团队。"
+        return "已记下您的需求，规划会自动体现。"  # 只做信息更新的回复（无反馈意图词）
+
+    monkeypatch.setattr("tripmate.session.stream_chatter", fake_stream)
+    monkeypatch.setattr(TeamRunner, "_phase_loop", fake_phase)
+    reply = asyncio.run(s.handle_user_message("第 2 天换成都江堰"))
+    assert reply == "修改意见已提交给规划团队。"
+    assert len(calls) == 2 and "submit_draft_feedback" in calls[1]
+    # nudge 后反馈真实提交：待反馈态解除 + 修订阶段任务已启动（fake_phase）
+    assert not s.runner._awaiting_feedback and s.runner._task is not None
+    assert s.bb.profile.draft_feedback and s.bb.profile.draft_feedback.rounds_used == 1

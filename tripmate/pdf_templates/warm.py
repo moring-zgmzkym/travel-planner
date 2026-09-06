@@ -198,6 +198,7 @@ class WarmTemplate(BaseTripTemplate):
                         ("LEFTPADDING", (0, 0), (-1, -1), 8),
                     ]))
                 story.append(t)
+                story.extend(self.route_day_block(profile, i))   # 路线表插在天卡之后（不进 KeepTogether）
                 story.append(Spacer(1, 5))
         story.append(Spacer(1, 2))
 

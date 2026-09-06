@@ -172,3 +172,20 @@ def test_subagent_notify_errors_never_break_query():
 
     asyncio.run(main())
     assert calls["n"] == 2  # running + done 都尝试推送了
+
+
+def test_route_channel_extracts_and_degrades():
+    """route 通道与既有通道同协议：工具产出确定性提取 + 未调工具降级直调。"""
+    async def main():
+        async def query():
+            return {"days": [{"date": "2026-10-01", "stops": [], "segments": []}],
+                    "notice": None}
+
+        out = await run_channel_subagent("route", "任务", query,
+                                         model_client=_tool_call_client())
+        assert out["days"] and out["days"][0]["date"] == "2026-10-01"
+        out2 = await run_channel_subagent("route", "任务", query,
+                                          model_client=_text_client(2))
+        assert out2["notice"] is None
+
+    asyncio.run(main())

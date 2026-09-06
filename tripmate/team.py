@@ -34,6 +34,7 @@ from .planning import PACE_SPOTS, analyze_impact, compute_budget, validate_draft
 from .status import AUDIT, StatusBus
 from .tools.hotels import query_hotels, score_and_select as score_hotels
 from .tools.resilience import ServiceUnavailable, cancel_with_grace
+from .tools.route import compute_route_plan, merge_review, review_route_plan
 from .tools.search import search_city_covers, search_guides, search_images
 from .tools.tickets import query_tickets, score_and_select as score_tickets
 from .tools.weather import near_term_dates, query_weather
@@ -55,6 +56,8 @@ SPEAKER: dict[str, str] = {
     "PLAN_DRAFT": AGENT_PLANNER,
     "PLAN_IMGREQ": AGENT_PLANNER,
     "RES_IMG": AGENT_RES,
+    "MCP_ROUTE": AGENT_MCP,
+    "ROUTE_COLLECT": AGENT_MCP,
     "PLAN_PDF": AGENT_PLANNER,
     "DONE": AGENT_PROC,
 }
@@ -357,7 +360,7 @@ def make_researcher_tools(ctx: TeamContext):
         items = [ImageItem(spot=i["spot"], path=i.get("path", ""), source=i["source"], note=r.get("notice", ""))
                  for i in r["items"]]
         await ctx.bb.write("images", items, "researcher", "景点配图（" + r["mode"] + "）")
-        ctx.state.step = "PLAN_PDF"
+        ctx.state.step = "MCP_ROUTE"   # 配图完成 → 交棒 MCP 专项生成每日路线（finalize 流水线下一棒）
         await ctx.bus.emit(AGENT_RES,
                            f"配图完成：{len(items)} 张" + {"mock": "（本地示意配图，非实景）",
                                                           "mixed": "（部分实拍，部分示意）"}.get(r["mode"], "（实拍图）"),
@@ -542,7 +545,67 @@ def make_booking_tools(ctx: TeamContext):
             reference_only=any(x.reference_only for x in (*tickets, *hotels)),
         )
 
-    return [start_booking_queries, collect_booking_results]
+    # ---- 路线通道（finalize 阶段二次上台）：草稿确认后按每日景点算路线 + 饭点插餐厅 ----
+
+    async def _route_job() -> dict:
+        prof: TravelProfile = ctx.bb.profile
+        city = prof.basic_info.destination or ""
+
+        async def _query() -> dict:
+            await ctx.bus.emit(AGENT_MCP, f"路线规划中…（{city}｜景点坐标/段间交通/饭点餐厅）", "STATUS_MCP")
+            r = await compute_route_plan(prof)
+            tag = f"{len(r['days'])} 天" if r["days"] else "跳过"
+            await ctx.bus.emit(AGENT_MCP, f"路线规划完成：{tag}", "STATUS_MCP")
+            return r
+
+        return await run_channel_subagent(
+            "route",
+            f"计算「{city}」行程的每日路线（景点坐标、段间交通、饭点餐厅、导航链接）。调用工具即完成。",
+            _query, notify=_sub_notify(ctx.bus, "route", "路线"))
+
+    async def start_route_queries() -> str:
+        """（定稿阶段）启动每日路线计算：景点坐标、段间距离/耗时/交通方式、按美食笔记与饮食禁忌
+        在饭点插入餐厅、生成"当前位置出发"的导航链接。无参数：数据从共享黑板读取。
+        黑板无草稿时跳过（不启动任务、不推进状态机——collect 阶段误触发零副作用）。
+        必须真正调用本工具，返回后再简短回复 ROUTE_STARTED。"""
+        prof: TravelProfile = ctx.bb.profile
+        if not prof.draft:
+            return _ok(status="skipped", note="黑板无草稿，路线规划跳过")
+        ctx.state.step = "ROUTE_COLLECT"
+        ctx.jobs.submit("route", _route_job())
+        AUDIT.action(AGENT_MCP, "start_route_queries", f"destination={prof.basic_info.destination or ''}")
+        return _ok(status="submitted")
+
+    async def collect_route_results() -> str:
+        """收割每日路线：LLM 审查（每日点评/问题警告）后写入黑板 routes 分区。
+        任务未启动时自动提交（自愈）。单通道失败降级为无路线（PDF 省略路线版块），不阻塞定稿。"""
+        prof: TravelProfile = ctx.bb.profile
+        if not prof.draft:
+            return _ok(status="skipped", note="黑板无草稿，路线规划跳过")
+        try:
+            if not ctx.jobs.has("route"):
+                AUDIT.thought(AGENT_MCP, "collect 自愈：start 工具未执行，自动提交路线计算")
+                ctx.jobs.submit("route", _route_job())
+            r = await ctx.jobs.collect("route")
+            review = await review_route_plan(get_model_client(), r, prof)
+            routes = merge_review(r, review)
+            await ctx.bb.write("routes", routes, "booking",
+                               "每日路线与导航" + ("（部分段间为离线估算）" if r.get("notice") else "（MCP 实时）"))
+            ctx.check_run_budget()
+        except TokenBudgetExceeded:
+            raise  # 熔断不得被降级链吞掉
+        except Exception as exc:  # noqa: BLE001 — 单通道失败降级为无路线，不阻塞定稿
+            AUDIT.observation(AGENT_MCP, f"路线通道收割失败，降级为无路线：{type(exc).__name__}: {exc}")
+            ctx.state.step = "PLAN_PDF"
+            return _ok(status="error", error=f"路线计算失败（{type(exc).__name__}），本次 PDF 不含每日路线")
+        ctx.state.step = "PLAN_PDF"
+        return _ok(status="written", days=len(routes),
+                   notice=r.get("notice"),
+                   briefs=[f"D{i + 1} {len(rd.stops)}站/{rd.total_km:g}km" for i, rd in enumerate(routes)],
+                   summaries=[rd.summary for rd in routes if rd.summary])
+
+    return [start_booking_queries, collect_booking_results,
+            start_route_queries, collect_route_results]
 
 
 def make_processor_tools(ctx: TeamContext):
@@ -661,6 +724,14 @@ async def _deliver_final(ctx: TeamContext) -> str:
     prof: TravelProfile = ctx.bb.profile
     if not prof.draft:
         return _ok(status="error", error="黑板无草稿")
+    # 路线保险：finalize 流内路线步骤未产出时（LLM 协议执行不完美）渲染前确定性补算，
+    # 尽量保证 PDF 含每日路线；幂等（routes 已在则零开销）。失败不阻塞出 PDF。
+    if not prof.routes:
+        try:
+            r = await compute_route_plan(prof)
+            await ctx.bb.write("routes", merge_review(r, {}), "booking", "定稿保险：路线分区缺失补算")
+        except Exception as exc:  # noqa: BLE001 — 保险失败仅记审计，PDF 省略路线版块
+            AUDIT.observation("TeamRunner", f"路线定稿保险失败（跳过）：{type(exc).__name__}: {exc}")
     path = await asyncio.to_thread(
         build_pdf, prof.model_copy(deep=True), ctx.run_id, prof.basic_info.template)
     # to_thread：reportlab 渲染是同步重活，内联执行会冻结整个事件循环（所有会话的推送全停摆）；
@@ -692,7 +763,8 @@ async def _deliver_final(ctx: TeamContext) -> str:
     await ctx.bus.emit(AGENT_PLANNER, "规划完成：PDF 已生成，订单清单已就绪", "STATUS_COMPLETED",
                        pdf_url=final.pdf_url)
     return _ok(status="ok", pdf_path=path, pdf_url=final.pdf_url,
-               orders=orders, total_price=final.total_price)
+               orders=orders, total_price=final.total_price,
+               route_days=len(prof.routes))
 
 
 # ---------------------------------------------------------------------------
@@ -745,7 +817,8 @@ class TeamRunner:
         # 目的地变化时数据分区连带清，防止旧行程的车票/酒店/攻略混入新订单与预算——护栏会按新行程重新补齐。
         # 清空必须在 _base_version 采集之前（增量重跑/终止判定以清空后的黑板为基准）。
         dest = prof.basic_info.destination or ""
-        clear: dict[str, Any] = {"draft": None, "draft_feedback": None, "final": None, "plan_input": None}
+        clear: dict[str, Any] = {"draft": None, "draft_feedback": None, "final": None,
+                                 "plan_input": None, "routes": []}
         if dest != self._last_destination:
             # spot_notes/food_notes/cover_images 一并清：旧城市的笔记/封面混入新 PDF 是正确性 bug
             # （2026-09-04 核查：此前只清数据分区，笔记与封面残留且幂等标志阻止重取）
@@ -944,7 +1017,7 @@ class TeamRunner:
         self._phase_started = asyncio.get_running_loop().time()
         # ETA（2026-08-31 实测分布）：collect 首轮 5-10 分、增量重跑 5-15 分、revise 1-3 分、finalize 1-2 分
         eta = {"collect": (5, 15) if changed_fields else (5, 10),
-               "revise": (1, 3), "finalize": (1, 2)}[phase]
+               "revise": (1, 3), "finalize": (2, 4)}[phase]
         await self.bus.emit("TeamRunner",
                             {"collect": "规划团队启动（信息处理/信息收集/MCP 专项/计划规划 四 Agent 对等协同）",
                              "revise": f"草稿修订（第 {self._draft_rounds} 轮）",
@@ -1093,6 +1166,14 @@ class TeamRunner:
                 items = [ImageItem(spot=i["spot"], path=i.get("path", ""), source=i["source"], note=r.get("notice", ""))
                          for i in r["items"]]
                 await self.bb.write("images", items, "researcher", "护栏补齐：图片分区缺失")
+            # 路线护栏：流内 route 通道未产出时确定性补算（deadline 约束内），失败不阻塞出 PDF
+            if not self.bb.profile.routes and self.bb.profile.draft:
+                try:
+                    r = await compute_route_plan(self.bb.profile)
+                    await self.bb.write("routes", merge_review(r, {}), "booking", "护栏补齐：路线分区缺失")
+                    AUDIT.observation("TeamRunner", "guardrail 补齐 routes")
+                except Exception as e:  # noqa: BLE001 — 路线护栏失败跳过（PDF 省略路线版块）
+                    AUDIT.observation("TeamRunner", f"护栏补齐路线分区失败（跳过）：{type(e).__name__}: {e}")
             if not self.bb.profile.final:
                 if not self.bb.profile.draft:
                     draft = _fallback_draft(self.bb.profile)
@@ -1216,7 +1297,15 @@ class TeamRunner:
                 state.step = "RES_IMG"
             elif (state.step == "RES_IMG" and last_src == AGENT_RES
                   and "IMAGE_RESULT" not in last_txt and state.consecutive >= 2):
+                state.step = "MCP_ROUTE"   # 配图空转 → 交给 MCP 专项生成路线（图片由护栏兜底）
+            elif (state.step == "MCP_ROUTE" and last_src == AGENT_MCP
+                  and "ROUTE_STARTED" not in last_txt and state.consecutive >= 2):
+                state.step = "ROUTE_COLLECT"
+                AUDIT.thought("Selector", "BookingButler 路线启动空转，推进到路线收割")
+            elif (state.step == "ROUTE_COLLECT" and last_src == AGENT_MCP
+                  and "ROUTE_RESULT" not in last_txt and state.consecutive >= 2):
                 state.step = "PLAN_PDF"
+                AUDIT.thought("Selector", "BookingButler 路线收割空转，推进到定稿（路线由保险/护栏兜底）")
         speaker = SPEAKER.get(state.step, AGENT_PROC)
         if speaker == state.last_speaker:
             state.consecutive += 1
@@ -1244,7 +1333,8 @@ class TeamRunner:
                     f"\n（这是第 {self._draft_rounds} 轮修改，共上限 {BudgetConfig.MAX_DRAFT_ROUNDS} 轮）"
                     "\n请计划规划 Agent 按反馈修订行程并重新调用 submit_draft。")
         return "DRAFT_CONFIRMED 用户已确认草稿。请计划规划 Agent 调用 request_images 发起图片请求，" \
-               "待 IMAGE_RESULT 后调用 deliver_final 完成定稿。"
+               "待 IMAGE_RESULT 后由 MCP 专项 Agent 启动每日路线规划（路线就绪后回复 ROUTE_RESULT），" \
+               "计划规划 Agent 在路线就绪后调用 deliver_final 完成定稿。"
 
     async def _stream_team(self, team: SelectorGroupChat, task_text: str) -> tuple[str, list[str]]:
         """事件流采集：Thought/Action/Observation → 审计日志（验收 #16）；Agent 最终消息 → 用户时间线。

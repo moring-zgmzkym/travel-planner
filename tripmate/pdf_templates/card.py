@@ -247,6 +247,7 @@ class CardTemplate(BaseTripTemplate):
                 # 单卡高度有界（头条 + 三时段行），KeepTogether 保证整卡不跨页断裂；
                 # 极端超长文本时由 reportlab 按行自然分页。
                 story.append(KeepTogether([t]))
+                story.extend(self.route_day_block(profile, i))   # 路线表插在天卡之后（不进 KeepTogether）
                 story.append(Spacer(1, 5))
         story.append(Spacer(1, 2))
 

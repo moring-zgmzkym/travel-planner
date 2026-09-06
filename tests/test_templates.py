@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from test_pdf import _profile_bb
+from test_pdf import _profile_bb, _routes_profile_bb
 from tripmate.models import BasicInfo, Draft, DraftDay
 from tripmate.pdf_templates import REGISTRY, get_template, list_templates
 
@@ -74,3 +74,12 @@ def test_all_templates_survive_hostile_external_text():
     for t in list_templates():
         path = build_pdf(prof.model_copy(deep=True), f"hostile{t['name']}", t["name"])
         assert path
+
+
+@pytest.mark.parametrize("name", TEMPLATE_NAMES)
+def test_template_render_with_routes(name):
+    """含每日路线画像：全部模板渲染路线表（含二维码绘制路径）不抛错。"""
+    bb = _routes_profile_bb()
+    path = REGISTRY[name].render(bb.profile, run_id=f"tplrt_{name}")
+    data = Path(path).read_bytes()
+    assert data[:4] == b"%PDF" and len(data) > 4000

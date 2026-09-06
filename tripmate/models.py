@@ -147,6 +147,42 @@ class Draft(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class RouteStop(BaseModel):
+    """路线站点（route 分区）：景点/饭点餐厅/酒店锚点。坐标与导航链接由路线计算填充，
+    查不到坐标时保留展示但 nav_url 为空并标注 note（不静默）。"""
+
+    kind: Literal["spot", "meal", "hotel"] = "spot"
+    meal: str = ""                # kind=meal 时的餐次标注（"午餐"/"晚餐"）
+    name: str
+    address: str = ""
+    lon: float | None = None
+    lat: float | None = None
+    nav_url: str = ""             # 高德 URI 导航链接（省略 from=运行时取 GPS 当前位置）
+    reference_only: bool = False  # 餐厅/坐标为降级估算时 True
+    note: str = ""                # 警示标注（坐标未获取/自由安排等）
+
+
+class RouteSegment(BaseModel):
+    """路线段间（RouteDay.stops[i] → stops[i+1]）：距离/耗时/交通方式，len = len(stops)-1。"""
+
+    distance_m: int = 0
+    duration_min: int = 0
+    mode: str = ""                # 步行/公交/驾车/估算
+    reference_only: bool = False  # MCP 不可用时的哈弗辛估算为 True
+
+
+class RouteDay(BaseModel):
+    """每日路线（黑板 routes 分区，finalize 阶段 route 通道写入）：与 draft.days 逐日同序。
+    注意区别于 GuideDigestItem.routes（攻略摘要里的路线文本）——本模型是结构化可导航路线。"""
+
+    date: str
+    stops: list[RouteStop] = Field(default_factory=list)
+    segments: list[RouteSegment] = Field(default_factory=list)
+    summary: str = ""             # LLM 审查的一句点评（失败留空）
+    warnings: list[str] = Field(default_factory=list)
+    total_km: float = 0.0
+
+
 class DraftFeedback(BaseModel):
     confirmed: bool = False
     feedback: str = ""
@@ -197,6 +233,7 @@ class TravelProfile(BaseModel):
     spot_notes: list[SpotNote] = Field(default_factory=list)
     food_notes: list[FoodNote] = Field(default_factory=list)
     cover_images: list[str] = Field(default_factory=list)  # 封面城市宣传图候选（citycover_ 前缀，与素材图隔离）
+    routes: list[RouteDay] = Field(default_factory=list)   # 每日路线与导航（finalize 阶段 route 通道写入）
     plan_input: PlanInput | None = None
     draft: Draft | None = None
     draft_feedback: DraftFeedback | None = None

@@ -46,3 +46,33 @@ def test_build_pdf_smoke():
     path = build_pdf(bb.profile, run_id="testrun01")
     data = open(path, "rb").read()
     assert data[:4] == b"%PDF" and len(data) > 10000
+
+
+def _routes_profile_bb() -> Blackboard:
+    """含每日路线的画像（本文件与 test_templates 的路线表渲染测试共用）。"""
+    from tripmate.models import RouteDay, RouteSegment, RouteStop
+
+    bb = _profile_bb()
+    nav = ("https://uri.amap.com/navigation?to=104.14,30.73,%E7%86%8A%E7%8C%AB"
+           "&mode=bus&src=tripmate&coordinate=gaode&callnative=0")
+    bb.profile.routes = [RouteDay(
+        date="2026-10-01",
+        stops=[
+            RouteStop(kind="spot", name="大熊猫繁育研究基地", lon=104.14, lat=30.73, nav_url=nav),
+            RouteStop(kind="meal", meal="午餐", name="火锅店（春熙路店）", address="春熙路1号",
+                      lon=104.08, lat=30.66, nav_url=nav),
+            RouteStop(kind="spot", name="宽窄巷子", note="坐标未获取"),
+        ],
+        segments=[RouteSegment(distance_m=8000, duration_min=30, mode="公交"),
+                  RouteSegment(distance_m=600, duration_min=9, mode="步行"),
+                  RouteSegment()],
+        summary="路线整体顺路，午餐紧邻下午首站",
+        warnings=["下午两站距离较远（估算）"],
+        total_km=8.6)]
+    return bb
+
+
+def test_build_pdf_with_routes_smoke():
+    path = build_pdf(_routes_profile_bb().profile, run_id="routerun1")
+    data = open(path, "rb").read()
+    assert data[:4] == b"%PDF" and len(data) > 10000

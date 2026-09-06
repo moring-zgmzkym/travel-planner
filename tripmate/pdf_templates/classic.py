@@ -193,11 +193,14 @@ class ClassicTemplate(BaseTripTemplate):
                 t.setStyle(TableStyle(cmds))
                 day_flow.append(t)
         if day_flow:
-            # 每张日表 KeepTogether 防跨页拆分（照片/蓝头与行程永远同页）；章节头绑首表
+            # 每张日表 KeepTogether 防跨页拆分（照片/蓝头与行程永远同页）；章节头绑首表；
+            # 路线表插在对应天之后（独立 Flowable，不进 KeepTogether——整块超高会被强拆）
             story.append(KeepTogether([self.section("肆", "逐日行程"), Spacer(1, 3), day_flow[0]]))
-            for day_t in day_flow[1:]:
+            story.extend(self.route_day_block(profile, 0))
+            for i, day_t in enumerate(day_flow[1:], start=1):
                 story.append(Spacer(1, 12))
                 story.append(KeepTogether([day_t]))
+                story.extend(self.route_day_block(profile, i))
         story.append(Spacer(1, 2))
 
         # ---- 伍 预算核算 ----

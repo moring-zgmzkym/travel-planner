@@ -40,10 +40,21 @@ _START_INTENT = re.compile(
 # "我来提交给规划团队"——宣布后团队闲置，修订流程卡死）。
 # 2026-09-05 e2e 实测第三种变体：模型把调用文本化为 "、submit_draft_feedback(confirm=false,...)"
 # （前导顿号 + 函数调用形态）——加入裸工具名分支，使专用反馈 nudge 接管。
+# 2026-09-06 e2e 实测第四种变体：用户消息同时含可抽取字段与草稿修改意见（"第 2 天换成都江堰"），
+# 模型只调 save_travel_info（信息更新）而漏掉 submit_draft_feedback——反馈丢失、修订流程从未启动。
+# 增加用户原文侧的草稿修改意图断言（_USER_MODIFY_INTENT）作为补触发判据。
 _FEEDBACK_INTENT = re.compile(
     r"(?:转给|提交给|反馈给|转达给)(?:规划)?团队"
     r"|(?:修改意见|反馈|意见)[^。！？]{0,6}(?:已)?(?:提交|转达)(?:给)?(?:规划)?团队"
     r"|submit_draft_feedback\b")
+_USER_MODIFY_INTENT = re.compile(
+    r"第\s*[一二两三四五六七八九十\d]+\s*天[^。！？]{0,14}"
+    r"(?:换成|换到|改为|改成|替换|加上|加个|增加|去掉|删掉|删除|移除|提前|延后|不去)"
+    r"|(?:把|将)[^。！？]{0,14}(?:换成|换到|改为|改成|替换|去掉|删掉|删除|移除)"
+    r"|(?:换成|改为|改成|替换成|加上|加个|增加)[^。！？]{0,12}"
+    r"(?:景点|酒店|餐厅|民宿|车次|航班|安排|行程)"
+    r"|(?:去掉|删掉|删除|移除|不要去|不去)"
+    r"|(?:行程|草稿|安排|路线)[^。！？]{0,6}(?:调整|修改|改一下|换一下|重新排)")
 
 
 def _missed_tool_call(reply: str) -> bool:
@@ -235,20 +246,31 @@ class Session:
                         else:
                             reply = "规划团队暂时忙碌，您可以继续补充信息，稍后再告诉我开始规划。"
             # 兜底修复 3：草稿待反馈期，模型宣布"已把修改意见转给团队"但未真正调用工具
-            # （判闲与 submit_feedback 同源：_task 完成，而非 active 标志——collect 出草稿后
-            # active 仍为 True；工具未执行 + 待反馈才触发；nudge 一轮强制真调，失败诚实请用户重发）
+            # 兜底修复 4（2026-09-06 e2e 实测）：用户消息同时含可抽取字段与草稿修改意见时，
+            # 模型只做信息更新（save_travel_info）漏掉 submit_draft_feedback——按用户原文的
+            # 修改意图补触发。（判闲与 submit_feedback 同源：_task 完成；nudge 一轮强制真调，
+            # 失败诚实请用户重发）
             _fb_task = self.runner._task
+            _fb_announced = bool(_FEEDBACK_INTENT.search(reply or ""))
+            _fb_user_intent = bool(_USER_MODIFY_INTENT.search(text or ""))
             if (reply and "submit_draft_feedback" not in tools_seen
                     and (_fb_task is None or _fb_task.done()) and self.runner._awaiting_feedback
-                    and self.bb.profile.draft and _FEEDBACK_INTENT.search(reply)):
-                AUDIT.output("Chatter", "回复宣称已提交修改意见但工具未执行，nudge 重试")
+                    and self.bb.profile.draft and (_fb_announced or _fb_user_intent)):
+                AUDIT.output("Chatter", "回复宣称已提交修改意见但工具未执行，nudge 重试"
+                             if _fb_announced else
+                             "用户消息含草稿修改意图但模型只做了信息更新，nudge 补提交")
+                nudge = ("你上一条回复声称已把修改意见转给规划团队，但没有真正调用 submit_draft_feedback "
+                         "工具，修改意见并未提交。请立即通过 submit_draft_feedback 工具真正提交：feedback "
+                         "取用户本轮消息里的修改意见原文、confirmed=false（用户明确说确认草稿才是 true），"
+                         "然后给用户一句简短的自然语言回复。"
+                         if _fb_announced else
+                         "用户本轮消息是对当前草稿的修改意见（原文：\"" + text + "\"），你只更新了画像信息，"
+                         "修改意见并未提交给规划团队，草稿仍停留在待确认状态。请立即调用 submit_draft_feedback "
+                         "工具真正提交：feedback 取该条修改意见原文、confirmed=false（用户明确说确认草稿才是 "
+                         "true），然后给用户一句简短的自然语言回复。")
                 try:
                     reply2 = await asyncio.wait_for(
-                        stream_chatter(self.chatter,
-                                       "你上一条回复声称已把修改意见转给规划团队，但没有真正调用 submit_draft_feedback "
-                                       "工具，修改意见并未提交。请立即通过 submit_draft_feedback 工具真正提交：feedback "
-                                       "取用户本轮消息里的修改意见原文、confirmed=false（用户明确说确认草稿才是 true），"
-                                       "然后给用户一句简短的自然语言回复。",
+                        stream_chatter(self.chatter, nudge,
                                        source="system", seen_tools=tools_seen),
                         timeout=CHAT_TIMEOUT_S)
                 except asyncio.TimeoutError:

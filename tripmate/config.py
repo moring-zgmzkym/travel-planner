@@ -116,6 +116,14 @@ class BudgetConfig:
     MAX_CONSECUTIVE_SPEAKER: int = 2   # 单 Agent 连续发言上限（风险 #5）
 
 
+class RouteConfig:
+    """路线规划（route 通道）：一次计算含坐标/段间/饭点共 20-35 次串行 MCP 调用，单次调用
+    各有 90s 硬上限，无总量约束时最坏可拖 30+ 分钟——总预算护栏：单调时钟超限后剩余段
+    直接切哈弗辛离线估算（标注参考值），finalize 阶段永不被路线计算拖死。"""
+
+    BUDGET_S: float = float(_env("ROUTE_BUDGET_S", "240"))
+
+
 class ServerConfig:
     HOST: str = _env("HOST", "127.0.0.1")
     PORT: int = int(_env("PORT", "8000"))
