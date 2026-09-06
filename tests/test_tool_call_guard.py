@@ -46,3 +46,13 @@ def test_feedback_intent_matches_textualized_call():
     assert _FEEDBACK_INTENT.search('submit_draft_feedback(confirm=false, feedback="x")')
     assert _FEEDBACK_INTENT.search("把这条修改意见提交给规划团队")
     assert not _FEEDBACK_INTENT.search("今天天气不错")
+
+
+def test_function_style_textualization_detected():
+    """2026-09-06 e2e 实测第三种文本化变体（GLM）：<function=工具名>\n<parameter=...>
+    XML 风格标记——必须命中检测并从用户可见回复中清洗。"""
+    dirty = '<function=save_travel_info>\n<parameter=detail_info>\n{"must_visit": ["都江堰"]}'
+    assert _missed_tool_call(dirty)
+    assert _missed_tool_call("<function=submit_draft_feedback>")
+    cleaned = clean_reply(dirty)
+    assert "<function=" not in cleaned and "<parameter=" not in cleaned

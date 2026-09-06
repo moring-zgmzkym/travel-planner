@@ -22,7 +22,7 @@ RELAY_TIMEOUT_S = 180.0
 CHAT_TIMEOUT_S = 480.0
 
 _BARE_TOOL = re.compile(r"^(?:start_planning|submit_draft_feedback|get_travel_profile|save_travel_info|stop_planning)\b")
-_TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args)[^>]*>", re.IGNORECASE)
+_TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args|function|parameter)[^>]*>", re.IGNORECASE)
 # 启动意图断言：模型可能宣布启动（中文）而未真正调用 start_planning 工具，
 # 确定性兜底需覆盖中英文多种表述（"启动新一轮规划"为 2026-08-30 实测漏接变体；
 # "现在开始为您规划"等带称呼语的插入变体为 2026-08-31 实测漏接变体；

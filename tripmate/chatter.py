@@ -292,7 +292,7 @@ def _profile_view(bb: Blackboard) -> str:
     return json.dumps(view, ensure_ascii=False)
 
 
-_TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args)[^>]*>", re.IGNORECASE)
+_TOOL_MARKUP = re.compile(r"<[/]?(?:tool_calls?|tool_sep|arg_key|arg_value|args|function|parameter)[^>]*>", re.IGNORECASE)
 _TOOL_BLOCK = re.compile(r"<tool_calls?:[^>]*>.*?</tool_calls?>", re.IGNORECASE | re.DOTALL)
 
 
