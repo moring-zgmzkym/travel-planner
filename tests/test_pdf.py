@@ -76,3 +76,87 @@ def test_build_pdf_with_routes_smoke():
     path = build_pdf(_routes_profile_bb().profile, run_id="routerun1")
     data = open(path, "rb").read()
     assert data[:4] == b"%PDF" and len(data) > 10000
+
+
+# ---- 降级演练（2026-09-06 HTML 主路径改造）：引擎故障 / 应急开关 / 旧模板名兼容 ----
+
+def test_build_pdf_fallback_on_engine_failure(monkeypatch):
+    """HTML 引擎抛异常 → 自动降级 reportlab cartoon，on_fallback 回调携原因触发。"""
+    import tripmate.pdf_html as pdf_html
+
+    def _boom(profile, run_id):
+        raise RuntimeError("engine boom")
+
+    monkeypatch.setattr(pdf_html, "render", _boom)
+    fired: list[str] = []
+    path = build_pdf(_profile_bb().profile, run_id="fbrun001",
+                     on_fallback=fired.append)
+    data = open(path, "rb").read()
+    assert data[:4] == b"%PDF" and len(data) > 10000
+    assert fired and "engine boom" in fired[0]
+
+
+def test_build_pdf_fallback_callback_exception_swallowed(monkeypatch):
+    """on_fallback 回调自身抛异常不影响 PDF 交付。"""
+    import tripmate.pdf_html as pdf_html
+
+    monkeypatch.setattr(pdf_html, "render", lambda p, r: (_ for _ in ()).throw(RuntimeError("boom")))
+    def _bad_notify(reason):
+        raise ValueError("notify failed")
+
+    path = build_pdf(_profile_bb().profile, run_id="fbrun002", on_fallback=_bad_notify)
+    assert open(path, "rb").read()[:4] == b"%PDF"
+
+
+def test_build_pdf_reportlab_switch(monkeypatch):
+    """PDF_RENDERER=reportlab：一键回退 reportlab，HTML 引擎不应被触碰。"""
+    import tripmate.pdf_html as pdf_html
+
+    def _boom(profile, run_id):
+        raise AssertionError("HTML 引擎不应被调用")
+
+    monkeypatch.setattr(pdf_html, "render", _boom)
+    monkeypatch.setattr("tripmate.pdf_gen.PDF_RENDERER", "reportlab")
+    path = build_pdf(_profile_bb().profile, run_id="switchrun1")
+    assert open(path, "rb").read()[:4] == b"%PDF"
+
+
+def test_render_reportlab_legacy_template_name():
+    """存量会话持久化旧模板名不再引发 ValueError（未知名回退默认模板）。"""
+    from tripmate.pdf_gen import render_reportlab
+    path = render_reportlab(_profile_bb().profile, run_id="legacyrun1", template="classic")
+    assert open(path, "rb").read()[:4] == b"%PDF"
+
+
+def test_deliver_final_fallback_notify(monkeypatch):
+    """集成：HTML 引擎炸 → _deliver_final 仍交付 PDF 并向状态总线推送 STATUS_FALLBACK。"""
+    import asyncio
+
+    import tripmate.pdf_html as pdf_html
+    from tripmate.status import StatusBus
+    from tripmate.team import TeamContext, TeamRunner, TeamState, _deliver_final
+
+    def _boom(profile, run_id):
+        raise RuntimeError("engine boom")
+
+    monkeypatch.setattr(pdf_html, "render", _boom)
+    bb = _profile_bb()
+    bus = StatusBus()
+    runner = TeamRunner(bb, bus)
+    ctx = TeamContext(bb=bb, bus=bus, state=TeamState(), jobs=runner._jobs,
+                      runner=runner, run_id="fbevents01")
+
+    async def main():
+        q = bus.subscribe()
+        result = await _deliver_final(ctx)
+        evs = []
+        while not q.empty():
+            evs.append(q.get_nowait())
+        return result, evs
+
+    _, events = asyncio.run(main())
+    final = bb.profile.final
+    assert final is not None and final.pdf_path
+    assert open(final.pdf_path, "rb").read()[:4] == b"%PDF"
+    assert any(e["kind"] == "STATUS_FALLBACK" for e in events), "降级时间线提示未推送"
+    assert any(e["kind"] == "STATUS_COMPLETED" for e in events), "完成事件仍应推送"

@@ -48,13 +48,15 @@ def test_registry_metadata_and_errors():
 
 
 def test_all_templates_survive_hostile_external_text():
-    """回归（2026-09-05 修复 #14）：外部/LLM 文本含 & < > " 时全部 7 模板仍能出 PDF。
+    """回归（2026-09-05 修复 #14）：外部/LLM 文本含 & < > " 时全部注册模板仍能出 PDF。
 
     此前 reportlab paraparser 对裸 &/< 直接抛异常——一个 "A&B Hotel" 就让整个
-    finalize 阶段报废。转义必须既防漏（渲染成功）又防双转义（文本原样保留）。"""
+    finalize 阶段报废。转义必须既防漏（渲染成功）又防双转义（文本原样保留）。
+    直调 render_reportlab（降级引擎），不经过 build_pdf 的 HTML 主路径。"""
     from tripmate.models import (Draft, DraftDay, HotelCandidate, TicketCandidate,
                                  TravelProfile)
-    from tripmate.pdf_gen import build_pdf
+    from tripmate.pdf_gen import render_reportlab
+    from tripmate.pdf_templates import list_templates
 
     prof = TravelProfile(
         basic_info={"destination": '西<安>&站', "origin": "上海&A", "days": 2,
@@ -70,9 +72,8 @@ def test_all_templates_survive_hostile_external_text():
                                    spots=["兵马俑&华清池"])],
                     warnings=["预算紧张&需注意"]),
     )
-    from tripmate.pdf_templates import list_templates
     for t in list_templates():
-        path = build_pdf(prof.model_copy(deep=True), f"hostile{t['name']}", t["name"])
+        path = render_reportlab(prof.model_copy(deep=True), f"hostile{t['name']}", t["name"])
         assert path
 
 

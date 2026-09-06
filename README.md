@@ -57,11 +57,12 @@ python run.py          # 或 Windows 双击 run.bat
 | `tripmate/llm.py` | 模型客户端工厂：主备自动故障切换（主模型失败切次级、冷却后自动切回）+ token 成本控制 |
 | `tripmate/tools/` | 搜索、图片、MCP 客户端基座、车票/酒店/天气适配层、路线规划适配层（route 通道：每日景点串联/段间交通/饭点餐厅/导航链接+二维码，deadline 总预算护栏） |
 | `tripmate/planning.py` | 变更影响分析（§5.3）、预算核算（§4.5）、草稿校验（可单测纯逻辑） |
-| `tripmate/pdf_gen.py` | PDF 生成入口：按模板名从注册表分发（weasyprint 在 Windows 缺 GTK，按企划书备选方案采用 reportlab） |
-| `tripmate/pdf_templates/` | 固定模板库：公共积木基类 + 多风格版式（经典旅行手册/慢游图文路书/极简黑白/卡片式/暖色休闲/手账风），前端可选路书样式 |
+| `tripmate/pdf_gen.py` | PDF 生成入口：主路径 HTML→Chromium 唐风路书，异常/`PDF_RENDERER=reportlab` 时降级 reportlab cartoon（weasyprint 在 Windows 缺 GTK 不可用） |
+| `tripmate/pdf_html/` | HTML 路书渲染器：Jinja2 模板（仿参考样张"唐风夜色"版式）+ Playwright 三段渲染 + pymupdf 合并（页码/书签/元数据） |
+| `tripmate/pdf_templates/` | reportlab 降级引擎：公共积木基类 + 卡通游记风模板（原 classic 版式已并入 cartoon） |
 | `tripmate/gateway/app.py` | FastAPI + WebSocket 网关 |
 | `static/` | 前端三件套（原生 JS） |
-| `tests/` | 64 项单测（黑板/影响分析/打分/校验/selector/路书PDF/多模板PDF冒烟与边界/主备切换/二次规划/会话） |
+| `tests/` | 单测（黑板/影响分析/打分/校验/selector/路书PDF（HTML 主路径+reportlab 降级）/主备切换/二次规划/会话），引擎不可用时 HTML 用例自动 skip、降级路径仍被守护 |
 | `scripts/` | 端到端冒烟脚本（e2e_step1/2/3） |
 | `outputs/` | PDF 与配图产物 |
 | `logs/tripmate.log` | ReAct 审计日志（Thought→Action→Observation→产出，验收 #16 证据） |
@@ -111,5 +112,5 @@ python scripts/e2e_step4_finalize.py# 冒烟④ 定稿→PDF/订单清单（无�
 - 小红书无公开图文接口（登录墙+反爬，Tavily 亦无法穿透），攻略与图片走全网+站点限定检索，
   图片按权威媒体/官方图源优先排序。
 - 支付不接触（需商户资质，§4.4/§7），只做订单参数汇总 + 直达链接。
-- weasyprint 在 Windows 需 GTK 运行库，本项目按企划书备选方案采用 reportlab（HTML 模板仍用于网页端草稿预览）。
+- PDF 主渲染路径为 HTML→Chromium（`tripmate/pdf_html`，需 `playwright install chromium`，或复用系统 Edge）；渲染异常自动降级 reportlab cartoon 并在时间线提示。`.env` 设 `PDF_RENDERER=reportlab` 可一键回退纯 reportlab 行为。weasyprint 在 Windows 缺 GTK 运行库，不采用。
 - 12306-MCP 为社区实现，可能随 12306 接口变动失效；失效自动降级并提示。

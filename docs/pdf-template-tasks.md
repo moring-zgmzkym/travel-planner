@@ -89,4 +89,17 @@
 | 4.3 文档更新 | ✅ | README 目录/测试数已更新；本清单进度记录同步 |
 | 4.4 提交留档 | ⬜ | 未提交（等小组评审样张后再提交） |
 
-**遗留事项**：① 小组评审样张（不达标则按决策记录回退路线 A）；② 完整环境端到端走查（前端下拉 → 定稿 PDF 样式）；③ 可选的 Agent 自动推荐模板。
+**遗留事项**：① ~~小组评审样张（不达标则按决策记录回退路线 A）~~（2026-09-06 评审触发回退条件，路线 A 已转正，见下）；② 完整环境端到端走查（~~前端下拉 → 定稿 PDF 样式~~ 下拉已随路线 A 移除，改为完整对话走查定稿新样式）；③ 可选的 Agent 自动推荐模板（保持可选）。
+
+## 进度记录（2026-09-06 执行：路线 A 转正 + reportlab 收缩）
+
+| 事项 | 状态 | 说明 |
+|---|---|---|
+| A.1 HTML 渲染器 | ✅ | `tripmate/pdf_html/`（context/templates/engine）：唐风夜色版式复刻参考样张，功能对齐规格逐项落位；Chromium→Edge 引擎链 + reportlab 降级 |
+| A.2 编排切换 | ✅ | `build_pdf` 主路径 HTML，异常降级 cartoon + on_fallback 时间线提示；`PDF_RENDERER` 应急开关；`render_reportlab` 供降级/脚本 |
+| A.3 降级演练 | ✅ | 引擎故障→cartoon PDF+STATUS_FALLBACK+COMPLETED（`_deliver_final` 集成测试）；回调异常吞掉；`PDF_RENDERER=reportlab` 不触碰 HTML；旧模板名不再 ValueError |
+| B.1 cartoon 自包含 | ✅ | classic.py 逐字并入 `_ClassicLayout`，合并前后样张像素级对比零变化（仅页脚生成时间戳） |
+| B.2 模板收缩 | ✅ | 删 classic/guide/minimal/card/warm/journal；注册表仅 cartoon；base.py 移除 canvasmaker 死参数链 |
+| B.3 前端收缩 | ✅ | 模板下拉移除（/api/templates 与 WS template 分支保留，兼容旧缓存页面） |
+| B.4 依赖与文档 | ✅ | requirements += playwright/pymupdf；README/启动指南/models 注释/决策记录同步 |
+| B.5 验证 | ✅ | 全量 pytest 通过；`scripts/e2e_step4_finalize.py` 7/7；`scripts/render_html_verify.py` 全页 PNG 与参考样张逐页对照 |

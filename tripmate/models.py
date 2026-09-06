@@ -26,7 +26,7 @@ class BasicInfo(BaseModel):
     budget_max: float | None = None
     party_size: int = 1
     defaults_applied: list[str] = Field(default_factory=list)  # 被默认值补齐的字段名
-    template: str | None = None  # PDF 模板名（空=默认卡通模板；注册表见 pdf_templates）
+    template: str | None = None  # 已废弃（2026-09-06 起 PDF 统一 HTML 唐风路书）；仅旧会话兼容保留
 
     def missing_required(self) -> list[str]:
         """不可默认字段缺失清单（§2.1：出发地/目的地/天数）。"""

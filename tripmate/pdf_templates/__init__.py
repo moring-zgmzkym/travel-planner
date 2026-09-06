@@ -1,24 +1,16 @@
-"""PDF 模板注册表：新增模板在此登记即可被 build_pdf(template=...) 选用。"""
+"""PDF 模板注册表（降级引擎）：reportlab 侧仅保留 cartoon；主渲染路径见 pdf_html。
+
+新增模板在此登记即可被 render_reportlab(template=...) 选用（build_pdf 主路径固定
+HTML，未知名一律回退默认模板，不再抛 ValueError）。
+"""
 
 from __future__ import annotations
 
 from .base import BaseTripTemplate
-from .card import CardTemplate
 from .cartoon import CartoonTemplate
-from .classic import ClassicTemplate
-from .guide import GuideTemplate
-from .journal import JournalTemplate
-from .minimal import MinimalTemplate
-from .warm import WarmTemplate
 
 _TEMPLATE_CLASSES: list[type[BaseTripTemplate]] = [
     CartoonTemplate,
-    ClassicTemplate,
-    GuideTemplate,
-    MinimalTemplate,
-    CardTemplate,
-    WarmTemplate,
-    JournalTemplate,
 ]
 
 REGISTRY: dict[str, BaseTripTemplate] = {cls.name: cls() for cls in _TEMPLATE_CLASSES}
@@ -33,7 +25,7 @@ def get_template(name: str | None = None) -> BaseTripTemplate:
 
 
 def list_templates() -> list[dict]:
-    """模板元数据（供前端下拉选择与 Agent 推荐）。"""
+    """模板元数据（供降级引擎说明与脚本验证）。"""
     return [{"name": t.name, "display_name": t.display_name,
              "description": t.description, "scenes": t.scenes}
             for t in REGISTRY.values()]

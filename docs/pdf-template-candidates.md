@@ -45,3 +45,13 @@
 - 模板数量定为 4–5 个（含现有 Classic）。
 - **回退条件**：若复刻出的样张视觉效果经小组评审不达标，再重新评估路线 A（HTML 模板 + Playwright 渲染）。
 - 具体实施计划见 `pdf-template-plan.md`。
+
+## 决策记录（2026-09-06）：路线 A 转正
+
+**小组决定：HTML→Chromium（路线 A）转正为主渲染路径，reportlab 降级为备用引擎。**
+
+- 依据当日评审：reportlab 复刻样张在图文混排/渐变/圆角卡片等表达力上不达标，触发 2026-09-01 预设的回退条件。
+- 实施落地：`tripmate/pdf_html/`（Jinja2 模板复刻参考样张《陕西3天2晚懒人版旅行路书_图文版.pdf》的"唐风夜色"版式 → Playwright 无头 Chromium 打印 → pymupdf 合并后处理）。本机 Chromium 151 与系统 Edge 152 均实测可用；WeasyPrint 因 Windows 缺 Pango/GTK DLL 排除。
+- reportlab 侧收缩为**仅 cartoon 一套**作降级（原 classic 版式逐字并入 cartoon，样张像素级对比零变化），其余 6 套模板删除；前端模板下拉随之移除。
+- 安全阀：HTML 渲染任何异常自动降级 cartoon 并在时间线提示；`.env` 设 `PDF_RENDERER=reportlab` 一键回退旧行为。
+- 依赖变更：requirements 新增 playwright / pymupdf（此前未声明的既有依赖转正）。

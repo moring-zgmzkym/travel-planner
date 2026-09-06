@@ -133,3 +133,7 @@ class ServerConfig:
 
 # 是否允许降级（关闭后外部服务失败直接报错，用于演示降级开关）
 ALLOW_MOCK_FALLBACK: bool = _env("ALLOW_MOCK_FALLBACK", "1") not in ("0", "false", "False")
+
+# PDF 渲染引擎开关：html = Chromium 渲染唐风路书（默认）；reportlab = 一键回退
+# reportlab cartoon 旧路径（现场应急）。HTML 渲染异常时也会自动降级到 reportlab。
+PDF_RENDERER: str = _env("PDF_RENDERER", "html").strip().lower()

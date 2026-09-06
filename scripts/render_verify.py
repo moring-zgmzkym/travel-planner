@@ -1,7 +1,8 @@
-"""PDF 渲染验证脚本（临时验收用）：富画像 → 指定模板渲染 → 全页 PNG。
+"""PDF 渲染验证脚本（临时验收用）：富画像 → 指定 reportlab 模板渲染 → 全页 PNG。
 
 用法：python scripts/render_verify.py <template> <out_prefix>
-模板可选 classic / cartoon / 其余注册名；PNG 落盘 outputs/pdf_baseline/<out_prefix>_pN.png
+模板可选 cartoon / 其余注册名（HTML 主路径验证用 render_html_verify.py）；
+PNG 落盘 outputs/pdf_baseline/<out_prefix>_pN.png
 """
 
 import sys
@@ -14,7 +15,7 @@ sys.path.insert(0, str(_ROOT / "tests"))
 import fitz  # noqa: E402
 
 from tripmate.models import FoodNote, SpotNote  # noqa: E402
-from tripmate.pdf_gen import build_pdf  # noqa: E402
+from tripmate.pdf_gen import render_reportlab  # noqa: E402
 from tripmate.tools.imagegen import generate_placeholder  # noqa: E402
 
 template = sys.argv[1] if len(sys.argv) > 1 else "cartoon"
@@ -58,7 +59,7 @@ for i, (n, p, d, r) in enumerate([("亚朵酒店（天府广场店）", 488, 1.2
         reason="评分次优备选", source="Dida 酒店 MCP（实时数据）", reference_only=False,
         image_path=generate_placeholder(n)))
 
-out = build_pdf(bb.profile, run_id=f"verify{prefix[:6]}", template=template)
+out = render_reportlab(bb.profile, run_id=f"verify{prefix[:6]}", template=template)
 doc = fitz.open(out)
 for i, page in enumerate(doc):
     page.get_pixmap(dpi=100).save(rf"outputs/pdf_baseline/{prefix}_p{i+1}.png")

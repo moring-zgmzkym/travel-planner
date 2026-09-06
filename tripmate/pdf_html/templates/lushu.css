@@ -1,0 +1,282 @@
+/* 唐风夜色路书主题 —— 复刻 learning/陕西3天2晚懒人版旅行路书_图文版.pdf 实测色板与版式。
+   @page 规则由各段模板（封面/正文/封底）内联注入，本文件只含类样式。 */
+
+:root {
+  --navy: #232953;      /* 藏青主色（Day 横幅/表头） */
+  --navy2: #2E3766;     /* 标题藏青 */
+  --navy3: #3B416A;     /* 深一号胶囊底 */
+  --gold: #D9A441;      /* 鎏金主色 */
+  --gold2: #B9862E;     /* 金棕文字 */
+  --gold-l: #F0CE86;    /* 深底上的浅金 */
+  --gold-bg: #FBF2DD;   /* 米金块底 */
+  --paper: #F1EBDD;     /* 宣纸标签列 */
+  --line: #E8E0CE;      /* 细边框 */
+  --cream: #FBF6EC;     /* 横幅底 */
+  --cream2: #FBF3E4;    /* 推荐行/合计行底 */
+  --red: #C4593F;       /* 警示红 */
+  --red-line: #E0B3A5;
+  --red-bg: #FAF1EC;
+  --green: #94B497;     /* 休整绿 */
+  --green-bg: #E6EFE3;
+  --bluegray: #B3BEDC;  /* 市内通勤蓝灰 */
+  --bluegray-bg: #E9EDF8;
+  --ink: #55526B;       /* 正文灰紫 */
+  --muted: #7C7A8C;     /* 弱化灰 */
+  --link: #3D4A8F;
+  --serif: "Noto Serif SC", "Source Han Serif SC", "STZhongsong", "SimSun", serif;
+  --sans: "Noto Sans SC", "Microsoft YaHei", "WenQuanYi Zen Hei", sans-serif;
+}
+
+* { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--sans); color: var(--ink); font-size: 9.8pt; line-height: 1.7;
+  overflow-wrap: break-word;
+}
+p { margin: 0; }
+a { color: var(--link); }
+b, strong { color: var(--navy2); }
+
+/* ---- 章节头（米金数字块 + 宋体标题 + 金色渐变线）---- */
+.sec { margin-top: 15pt; }
+.sec-head { display: flex; align-items: center; gap: 9pt; break-after: avoid; break-inside: avoid; }
+.sec-num {
+  width: 25pt; height: 25pt; border-radius: 6pt; background: var(--gold-bg);
+  color: var(--gold); font-family: var(--serif); font-weight: 700; font-size: 14.5pt;
+  display: flex; align-items: center; justify-content: center; flex: none;
+}
+.sec-head h2 { font-size: 19pt; letter-spacing: 1pt; font-weight: 700; }
+.sec-sub { color: var(--muted); font-size: 8.6pt; margin: 2pt 0 0 34pt; break-after: avoid; }
+.sec-rule {
+  height: 2pt; background: linear-gradient(90deg, var(--gold), #E8D3A0);
+  margin: 6pt 0 10pt; border-radius: 1pt;
+}
+
+/* ---- 小节头（金色竖条）---- */
+.subhead {
+  display: flex; align-items: center; gap: 6pt; margin: 10pt 0 6pt;
+  break-after: avoid; break-inside: avoid;
+}
+.subhead::before { content: ""; width: 3pt; height: 11pt; background: var(--gold); border-radius: 1pt; }
+.subhead h3 { font-size: 12.4pt; font-weight: 700; }
+.subhead .tag { font-size: 7.6pt; color: var(--muted); }
+
+/* ---- 卡片 ---- */
+.card {
+  background: #fff; border: 1px solid var(--line); border-radius: 10pt;
+  padding: 9pt 11pt; box-shadow: 0 1px 4px rgba(43, 47, 66, .06); break-inside: avoid;
+}
+.card h4 { font-size: 11pt; margin-bottom: 3pt; }
+.grid2 { display: flex; gap: 8pt; }
+.grid2 > * { flex: 1; min-width: 0; }
+.grid3 { display: flex; gap: 8pt; }
+.grid3 > * { flex: 1; min-width: 0; }
+.grid4 { display: flex; gap: 8pt; }
+.grid4 > * { flex: 1; min-width: 0; }
+
+/* ---- 通用表格（深藏青表头 + 圆角外框）---- */
+table.tbl {
+  width: 100%; border-collapse: separate; border-spacing: 0; font-size: 9.3pt;
+  border: 1px solid var(--line); border-radius: 10pt; overflow: hidden;
+}
+.tbl th {
+  background: var(--navy); color: #fff; font-weight: 700; text-align: left;
+  padding: 4.5pt 7pt; font-size: 9.2pt; white-space: nowrap;
+}
+.tbl td { padding: 4.5pt 7pt; border-top: 1px solid var(--line); vertical-align: top; }
+.tbl tr:nth-child(even) td { background: #FCFAF4; }
+.tbl tr.sel td { background: var(--cream2); }
+.tbl .num { text-align: right; }
+.tbl tr.sum td { background: var(--cream2); font-weight: 700; color: var(--navy2); }
+
+/* ---- 总览键值表 ---- */
+.kv td { border-top: 1px solid var(--line); padding: 5.5pt 8pt; vertical-align: top; }
+.kv tr:first-child td { border-top: none; }
+.kv .k { color: var(--muted); font-size: 9pt; white-space: nowrap; }
+.kv .k2 { color: var(--muted); font-size: 9pt; white-space: nowrap; }
+.kv .v { color: var(--navy2); font-weight: 700; }
+.kv td.lab { background: var(--paper); }
+
+/* ---- 胶囊标签 ---- */
+.chip {
+  display: inline-block; border-radius: 999pt; padding: 0.5pt 8pt;
+  font-size: 8.2pt; line-height: 1.6; margin: 1pt 2pt 1pt 0; white-space: nowrap;
+}
+.c-navy { background: var(--navy); color: #fff; }
+.c-navy3 { background: var(--navy3); color: var(--gold-l); }
+.c-transport { background: var(--bluegray-bg); color: var(--navy2); }
+.c-time { background: #F1EDE2; color: var(--muted); }
+.c-cost { background: #F7ECD4; color: var(--gold2); }
+.c-free { background: var(--green-bg); color: #4C7A50; }
+.c-warn { background: #fff; border: 1px solid var(--red-line); color: var(--red); }
+
+/* ---- Day 横幅 ---- */
+.day-banner {
+  background: linear-gradient(135deg, #252C58, #353F78); border-radius: 14pt;
+  color: #fff; padding: 10pt 14pt; display: flex; gap: 12pt; align-items: center;
+  break-inside: avoid; break-after: avoid;
+}
+.dbadge {
+  width: 36pt; height: 36pt; border: 1px solid var(--gold); border-radius: 8pt;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  flex: none; font-family: var(--serif);
+}
+.dbadge b { font-size: 13.5pt; color: var(--gold-l); line-height: 1.15; }
+.dbadge i { font-style: normal; font-size: 4.8pt; color: var(--gold-l); letter-spacing: 1.2pt; }
+.day-banner .t { font-family: var(--serif); font-size: 14pt; font-weight: 700; line-height: 1.35; }
+.day-banner .s { font-size: 8.6pt; color: rgba(255, 255, 255, .72); margin-top: 1pt; }
+.day-banner .chips { margin-top: 4pt; }
+.day-wrap { break-inside: auto; margin-top: 12pt; }
+
+/* ---- KPI 小卡 ---- */
+.kpi { display: flex; gap: 8pt; margin: 8pt 0; }
+.kpi .card {
+  text-align: center; padding: 6pt 4pt 5pt; border-top: 2pt solid var(--gold); border-radius: 8pt;
+}
+.kpi .v { font-family: var(--serif); font-size: 12.5pt; font-weight: 700; color: var(--navy2); }
+.kpi .l { font-size: 7.8pt; color: var(--muted); }
+
+/* ---- 垂直时间轴 ---- */
+.tl { position: relative; margin: 8pt 0 2pt 6pt; padding-left: 18pt; border-left: 2px solid #E4D5BC; }
+.tl-item { position: relative; margin-bottom: 9pt; break-inside: avoid; }
+.tl-item::before {
+  content: ""; position: absolute; left: -24.5pt; top: 12pt; width: 7pt; height: 7pt;
+  border-radius: 50%; background: #fff; border: 2.5px solid var(--dot, var(--navy2));
+}
+.tl-item .card { padding: 8pt 11pt; }
+.tl-item .hd { display: flex; align-items: baseline; gap: 6pt; flex-wrap: wrap; }
+.tl-item .hd h4 { font-size: 12pt; }
+.tl-item .chips { margin-top: 4pt; }
+.slot { font-family: var(--serif); font-weight: 700; color: var(--gold2); font-size: 10.5pt; }
+
+/* ---- 路线块 ---- */
+.route-card { background: #fff; border: 1px solid var(--line); border-radius: 10pt; overflow: hidden; break-inside: auto; }
+.route-head {
+  background: var(--navy); color: #fff; padding: 5pt 10pt; font-weight: 700;
+  font-size: 9.6pt; font-family: var(--serif); letter-spacing: .5pt;
+}
+.route-row { display: flex; gap: 9pt; padding: 6pt 10pt; border-top: 1px solid var(--line); break-inside: avoid; }
+.route-row:first-of-type { border-top: none; }
+.route-badge {
+  width: 17pt; height: 17pt; flex: none; border-radius: 5pt; background: var(--paper);
+  display: flex; align-items: center; justify-content: center; font-size: 9.5pt;
+}
+.route-mid { flex: 1; min-width: 0; }
+.route-mid .nm { font-weight: 700; color: var(--navy2); font-size: 10pt; }
+.route-mid .ad { font-size: 8.3pt; color: var(--muted); }
+.route-mid .nt { font-size: 8pt; color: var(--red); }
+.route-right { flex: none; text-align: right; }
+.route-conn {
+  background: #FCFAF4; color: var(--muted); font-size: 8.4pt; padding: 2.5pt 10pt 2.5pt 36pt;
+  border-top: 1px solid var(--line);
+}
+.route-tail { background: #FCFAF4; color: var(--red); font-size: 8.4pt; padding: 3pt 10pt; border-top: 1px solid var(--line); }
+
+/* ---- 图片 ---- */
+.photo { border-radius: 8pt; width: 100%; object-fit: cover; display: block; }
+.gallery { display: flex; flex-wrap: wrap; gap: 8pt; }
+.gallery .ph { width: calc(50% - 4pt); break-inside: avoid; }
+.gallery .ph .photo { height: 42mm; }
+.gallery .cap { font-size: 8.3pt; color: var(--muted); margin-top: 3pt; }
+.gallery .cap b { color: var(--gold2); text-decoration: underline; text-decoration-color: var(--gold-l); text-underline-offset: 2pt; }
+.dayphotos { display: flex; gap: 8pt; margin-top: 8pt; }
+.dayphotos .ph { flex: 1; min-width: 0; break-inside: avoid; }
+.dayphotos .photo { height: 30mm; }
+.dayphotos .cap { font-size: 7.8pt; color: var(--muted); margin-top: 2pt; }
+.noimg {
+  height: 30mm; border: 1px dashed var(--line); border-radius: 8pt; background: #FCFAF4;
+  display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 8.5pt;
+}
+
+/* ---- 酒店卡 ---- */
+.hotels { display: flex; gap: 8pt; }
+.hotels .card { padding: 0; overflow: hidden; }
+.hotels .hl-top { padding: 3pt 0; text-align: center; color: #fff; font-size: 9pt; font-weight: 700; letter-spacing: 1pt; }
+.hotels .card.rec { border: 1.6pt solid var(--gold); }
+.hotels .hl-body { padding: 7pt 9pt 8pt; }
+.hotels .nm { font-family: var(--serif); font-weight: 700; color: var(--navy2); font-size: 10.8pt; }
+.hotels .pr { color: var(--gold2); font-weight: 700; font-size: 9.3pt; margin: 2pt 0; }
+.hotels ul { margin: 3pt 0 0; padding-left: 12pt; font-size: 8.5pt; color: var(--ink); }
+.hotels img.wide { width: 100%; height: 26mm; object-fit: cover; display: block; }
+.hotels .imgwrap { height: 26mm; }
+.badge-sel {
+  display: inline-block; background: var(--green-bg); color: #4C7A50; font-weight: 700;
+  border-radius: 999pt; font-size: 7.8pt; padding: 0 7pt; margin-left: 4pt;
+}
+
+/* ---- 美食 ---- */
+.foodnotes .card { display: flex; gap: 9pt; margin-bottom: 8pt; }
+.foodnotes img { width: 38mm; height: 29mm; object-fit: cover; border-radius: 6pt; flex: none; }
+.foodnotes .nm { font-family: var(--serif); font-weight: 700; color: var(--navy2); font-size: 11.5pt; }
+.foodgrid { display: flex; flex-wrap: wrap; gap: 8pt; }
+.foodgrid .fg {
+  width: calc(25% - 6pt); text-align: center; border: 1px solid var(--line);
+  border-top: 2pt solid var(--gold); border-radius: 6pt; padding: 6pt 3pt;
+  font-weight: 700; color: var(--navy2); font-size: 9.2pt; background: #FCFAF4; break-inside: avoid;
+}
+
+/* ---- 预算 ---- */
+.occupancy { height: 4.5pt; border-radius: 3pt; background: #EFE9DA; overflow: hidden; margin: 6pt 0 3pt; }
+.occupancy i { display: block; height: 100%; background: var(--occ, var(--navy2)); }
+.budget-flex { display: flex; gap: 12pt; align-items: flex-start; }
+.budget-flex .donut { flex: none; text-align: center; }
+.legend { font-size: 8.5pt; margin-top: 6pt; }
+.legend .li { display: flex; align-items: center; gap: 5pt; margin: 1.5pt 0; }
+.legend .sw { width: 7pt; height: 7pt; border-radius: 2pt; flex: none; }
+
+/* ---- 天气 ---- */
+.wx { display: flex; gap: 8pt; margin-bottom: 8pt; }
+.wx .card { text-align: center; flex: 1; padding: 7pt 4pt; }
+.wx .ic { font-size: 14pt; }
+.wx .dt { font-family: var(--serif); font-weight: 700; color: var(--navy2); font-size: 9.6pt; }
+.wx .tx { font-size: 8.6pt; }
+.wx .tp { font-size: 9pt; color: var(--gold2); font-weight: 700; }
+
+/* ---- 原则卡 / 装备 / 通用 ---- */
+.principle { text-align: left; padding: 8pt 9pt; border-top: 2pt solid var(--gold); }
+.principle .zi {
+  width: 17pt; height: 17pt; border-radius: 4pt; background: var(--gold-bg); color: var(--gold);
+  font-family: var(--serif); font-weight: 700; display: inline-flex; align-items: center;
+  justify-content: center; font-size: 10.5pt; margin-bottom: 3pt;
+}
+.principle .t { font-weight: 700; color: var(--navy2); font-size: 10pt; font-family: var(--serif); }
+.principle .d { font-size: 8.3pt; color: var(--ink); margin-top: 2pt; }
+.checkgrid { display: flex; flex-wrap: wrap; gap: 6pt 12pt; }
+.checkgrid .ck { width: calc(33.33% - 8pt); font-size: 8.8pt; break-inside: avoid; }
+.checkgrid .box {
+  display: inline-block; width: 7.5pt; height: 7.5pt; border: 1.2pt solid var(--gold);
+  border-radius: 2pt; margin-right: 5pt; vertical-align: -1pt;
+}
+.checkgrid b { color: var(--navy2); }
+.tipbox { background: var(--cream); border-radius: 10pt; padding: 8pt 11pt; font-size: 8.8pt; break-inside: avoid; }
+.tipbox .lead { color: var(--gold2); font-weight: 700; }
+.warnbox {
+  background: var(--red-bg); border: 1px solid var(--red-line); border-radius: 10pt;
+  padding: 8pt 11pt; font-size: 8.8pt; break-inside: avoid;
+}
+.planb { background: var(--red-bg); border: 1px solid var(--red-line); border-radius: 10pt; padding: 8pt 11pt; break-inside: avoid; }
+.planb .t { color: var(--red); font-weight: 700; font-size: 9.6pt; margin-bottom: 2pt; }
+.planb ul, .warnbox ul, .card ul { margin: 2pt 0 0; padding-left: 13pt; }
+li { margin: 1.5pt 0; }
+
+/* ---- 预约/预案序号 ---- */
+.steps .card { margin-bottom: 7pt; }
+.stepnum {
+  display: inline-flex; width: 13pt; height: 13pt; border-radius: 50%; background: #E0A93C;
+  color: #fff; font-size: 8.5pt; align-items: center; justify-content: center;
+  margin-right: 6pt; vertical-align: -2pt;
+}
+
+/* ---- 注脚 ---- */
+.note { font-size: 8pt; color: var(--muted); margin-top: 4pt; }
+.srcline { font-size: 7.8pt; color: var(--muted); margin-top: 3pt; }
+.footline {
+  margin-top: 14pt; padding-top: 6pt; border-top: 1px solid var(--line);
+  font-size: 8pt; color: var(--muted); text-align: center;
+}
+.muted { color: var(--muted); }
+.mt4 { margin-top: 4pt; } .mt8 { margin-top: 8pt; } .mt12 { margin-top: 12pt; }
+.generic-tag {
+  display: inline-block; font-size: 7.4pt; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 999pt; padding: 0 6pt; margin-left: 6pt; vertical-align: 1.5pt;
+}

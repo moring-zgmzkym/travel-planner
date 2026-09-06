@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A4; margin: 0; }
+html, body { margin: 0; padding: 0; }
+{{ css }}
+.back {
+  width: 210mm; height: 296.5mm; overflow: hidden; position: relative;
+  background:
+    radial-gradient(circle at 50% 12%, rgba(234, 196, 117, .16), transparent 46%),
+    linear-gradient(170deg, #1B2144, #262D59);
+  color: #fff; display: flex; align-items: center; justify-content: center;
+}
+.back-inner { text-align: center; max-width: 160mm; }
+.back h1 { font-family: var(--serif); font-size: 30pt; font-weight: 700; letter-spacing: 4pt; }
+.back .sub { font-family: var(--serif); color: var(--gold-l); font-size: 12pt; letter-spacing: 3pt; margin-top: 6mm; }
+.back .line1 { color: #8A94B0; font-size: 9.4pt; margin-top: 9mm; }
+.back .line2 { color: #8A94B0; font-size: 9.4pt; margin-top: 2mm; }
+.back .gold { width: 14mm; height: 2pt; background: #D9A441; margin: 9mm auto 0; }
+.back .fine { color: rgba(138, 148, 176, .85); font-size: 8.5pt; margin-top: 8mm; line-height: 1.9; }
+</style>
+</head>
+<body>
+<div class="back">
+  <div class="back-inner">
+    <h1>{{ back.title }}</h1>
+    <div class="sub">{{ back.sub }}</div>
+    <div class="line1">{{ back.line1 }}</div>
+    <div class="line2">{{ back.line2 }}</div>
+    <div class="gold"></div>
+    <div class="fine">
+      本路书由 TripMate 多 Agent 协同旅游规划系统自动汇编，仅供出行参考<br>
+      车票 / 酒店 / 门票请在官方渠道完成预订与支付（系统不接触支付）<br>
+      天气、路线与价格为生成时点数据，出行前请再次核实
+    </div>
+  </div>
+</div>
+</body>
+</html>

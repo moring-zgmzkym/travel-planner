@@ -93,3 +93,23 @@
 - [Typst 样式系统实战](https://m.blog.csdn.net/gitblog_00703/article/details/156093049)
 - [HTML 排版与工程落地](https://m.php.cn/faq/2816776.html)
 - [PDF Export for AI Agents (PDFCrowd)](https://pdfcrowd.com/mcp-pdf-export/)
+
+## 五、2026-09-06 决策记录：路线 A 转正，本计划接口约定兑现
+
+2026-09-01 定案的"路线 B + 不达标回退路线 A"经样张评审触发回退条件，路线 A 正式转正：
+
+- **数据接口不变，只换渲染器**（本文件 §三 预留的约定兑现）：`build_pdf(profile, run_id, template)`
+  签名不变；主路径为 `pdf_html.render`（Jinja2 模板复刻 learning/陕西3天2晚懒人版旅行路书_图文版.pdf
+  的"唐风夜色"版式 → Playwright 无头 Chromium `page.pdf` → pymupdf 合并封面/正文/封底、
+  盖页码、加书签、写元数据）。
+- **降级链**：Chromium → 系统 Edge（channel）→ reportlab cartoon；任何异常自动降级并在
+  聊天时间线推送 STATUS_FALLBACK 提示 + 审计日志。应急开关 `.env PDF_RENDERER=reportlab`。
+- **稳定性设计**：playwright/pymupdf 懒加载（缺依赖不崩启动）；渲染仅发生在
+  `asyncio.to_thread` 工作线程 + 模块锁串行；launch/set_content/pdf 三段超时；
+  图片/二维码全部 data URI/内联 SVG，零临时文件零外部请求；正文 @page 底部留 16mm
+  页码带（页码渲染后盖章，不压正文）。
+- **reportlab 收缩**：仅保留 cartoon（classic 版式逐字并入 cartoon.py 的 `_ClassicLayout`，
+  合并前后样张像素级对比除生成时间戳外零变化）；删除其余 6 套模板与 base.py 的
+  canvasmaker 死参数链（原唯一使用者 guide.py 已删）。
+- 验证：全量 pytest 通过（含引擎故障降级/应急开关/旧模板名兼容/`_deliver_final` 集成
+  推送 STATUS_FALLBACK）；`scripts/render_html_verify.py` 出全页 PNG 与参考样张逐页对照。

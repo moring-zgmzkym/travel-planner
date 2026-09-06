@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A4; margin: 0 12mm 16mm 12mm; }
+html, body { margin: 0; padding: 0; }
+{{ css }}
+</style>
+</head>
+<body>
+
+{# ── 壹 行程总览 ─────────────────────────────── #}
+<section class="sec" style="margin-top:0">
+  <div class="sec-head"><div class="sec-num">壹</div><h2>行程总览</h2></div>
+  <div class="sec-sub">{{ basic.origin }} → {{ basic.destination }} · {{ basic.dates_txt }} · {{ basic.party }} 人同行</div>
+  <div class="sec-rule"></div>
+  <table class="tbl kv">
+    {% for k1, v1, k2, v2 in overview_rows %}
+    <tr>
+      <td class="lab k">{{ k1 }}</td><td class="v">{{ v1 }}</td>
+      <td class="lab k2">{{ k2 }}</td><td>{{ v2 }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if rhythm_line %}<p class="note">每日节奏：{{ rhythm_line }}</p>{% endif %}
+
+  <div class="subhead"><h3>设计原则 —— 本路书的安排底线</h3><span class="tag">通用建议</span></div>
+  <div class="grid4">
+    {% for zi, t, d in principles %}
+    <div class="card principle"><span class="zi">{{ zi }}</span><div class="t">{{ t }}</div><div class="d">{{ d }}</div></div>
+    {% endfor %}
+  </div>
+</section>
+
+{# ── 贰 天气与穿搭（无预报整体隐藏）────────────── #}
+{% if weather and weather.rows %}
+<section class="sec">
+  <div class="sec-head"><div class="sec-num">贰</div><h2>天气与穿搭提醒</h2></div>
+  <div class="sec-sub">确定性穿搭规则 · 出发前请再次确认最新预报</div>
+  <div class="sec-rule"></div>
+  <div class="wx">
+    {% for w in weather.rows %}
+    <div class="card">
+      <div class="ic">{{ w.emoji }}</div>
+      <div class="dt">{{ w.date }}</div>
+      <div class="tx">{{ w.day_text }}</div>
+      <div class="tp">{{ w.temp }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% for w in weather.rows %}<p class="mt4"><b>{{ w.date }}</b>（{{ w.day_text }}）：{{ w.advice }}</p>{% endfor %}
+  {% if weather.curve %}<div class="card mt8">{{ weather.curve|safe }}</div>{% endif %}
+  {% if weather.source %}<p class="note">数据源：{{ weather.source }}（预报窗约 16 天，出发前请再次确认）</p>{% endif %}
+</section>
+{% endif %}
+
+{# ── 叁 推荐订单清单 ───────────────────────────── #}
+{% if orders.rows %}
+<section class="sec">
+  <div class="sec-head"><div class="sec-num">叁</div><h2>推荐订单清单</h2></div>
+  <div class="sec-sub">Agent 已按您的要求筛选勾选 · 支付请在官方渠道完成</div>
+  <div class="sec-rule"></div>
+  <table class="tbl">
+    <tr><th>类型</th><th>名称 / 班次</th><th>关键信息</th><th>推荐理由</th><th>直达链接</th></tr>
+    {% for o in orders.rows %}
+    <tr class="{{ 'sel' if o.selected }}">
+      <td>{{ o.kind }}</td>
+      <td><b>{{ o.name }}</b>{% if o.selected %}<span class="badge-sel">√ 已勾选</span>{% endif %}</td>
+      <td>{{ o.info }}</td>
+      <td>{{ o.reason }}</td>
+      <td>{% if o.link %}<a href="{{ o.link }}">{{ o.link_label }} →</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="mt4"><b>{{ orders.total }}</b></p>
+  {% if orders.ref_note %}<p class="note" style="color:var(--red)">{{ orders.ref_note }}</p>{% endif %}
+</section>
+{% endif %}
+
+{# ── 肆 逐日行程 ──────────────────────────────── #}
+{% if days %}
+<section class="sec">
+  <div class="sec-head"><div class="sec-num">肆</div><h2>逐日行程</h2></div>
+  <div class="sec-sub">按天拆解动线、时段安排与导航路线</div>
+  <div class="sec-rule"></div>
+
+  {% for d in days %}
+  <div class="day-wrap">
+    <div class="day-banner">
+      <div class="dbadge"><b>D{{ d.n }}</b><i>DAY {{ "%02d" | format(d.n) }}</i></div>
+      <div>
+        <div class="t">{{ basic.origin }} → {{ basic.destination }}{% if d.spots %} ｜ {{ d.spots | join(" · ") }}{% endif %}</div>
+        <div class="s">{{ d.date }}{% if d.weekday %} · {{ d.weekday }}{% endif %} · 全天按「上午 / 下午 / 晚上」三段安排</div>
+        <div class="chips">{% for s in d.spots %}<span class="chip c-navy3"># {{ s }}</span>{% endfor %}</div>
+      </div>
+    </div>
+
+    {% if d.route %}
+    <div class="kpi">
+      {% for v, l in d.route.kpi %}<div class="card"><div class="v">{{ v }}</div><div class="l">{{ l }}</div></div>{% endfor %}
+    </div>
+    <div class="grid3">
+      <div class="card"><h4 style="color:var(--gold2)">当日动线</h4><p>{{ d.route.lane_go }}</p></div>
+      <div class="card"><h4 style="color:var(--gold2)">交通要点</h4><p>{{ d.route.lane_traffic }}</p></div>
+      <div class="card"><h4 style="color:var(--gold2)">当日餐饮主线</h4><p>{{ d.route.lane_food }}</p></div>
+    </div>
+    {% endif %}
+
+    <div class="subhead mt4"><h3>当日时刻表</h3></div>
+    <div class="tl">
+      <div class="tl-item" style="--dot:#B3BEDC">
+        <div class="card">
+          <div class="hd"><span class="slot">上午</span></div>
+          <p>{{ d.morning }}</p>
+        </div>
+      </div>
+      <div class="tl-item" style="--dot:#D9A441">
+        <div class="card">
+          <div class="hd"><span class="slot">下午</span></div>
+          <p>{{ d.afternoon }}</p>
+        </div>
+      </div>
+      <div class="tl-item" style="--dot:#C4593F">
+        <div class="card">
+          <div class="hd"><span class="slot">晚上</span></div>
+          <p>{{ d.evening }}</p>
+        </div>
+      </div>
+    </div>
+
+    {% if d.route %}
+    <div class="subhead"><h3>DAY {{ d.n }} 路线 · 全天约 {{ d.route.total_km }} km</h3></div>
+    <div class="route-card">
+      {% for s in d.route.stops %}
+      <div class="route-row">
+        <div class="route-badge">{{ s.badge }}</div>
+        <div class="route-mid">
+          <div class="nm">{{ s.label }}</div>
+          {% if s.address %}<div class="ad">{{ s.address }}</div>{% endif %}
+          {% if s.note %}<div class="nt">※ {{ s.note }}</div>{% endif %}
+        </div>
+        <div class="route-right">
+          {% if s.nav_url %}
+            <a href="{{ s.nav_url }}">导航 →</a>
+            {% if s.qr %}<div class="mt4">{{ s.qr|safe }}</div>{% endif %}
+          {% elif s.reference_only %}<span class="muted" style="font-size:7.6pt">参考值</span>
+          {% endif %}
+        </div>
+      </div>
+      {% if not loop.last %}
+      {% set conn = d.route.conns[loop.index0] if loop.index0 < d.route.conns | length else "" %}
+      {% if conn %}<div class="route-conn">{{ conn }}</div>{% endif %}
+      {% endif %}
+      {% endfor %}
+      {% if d.route.summary %}<div class="route-tail">※ 点评：{{ d.route.summary }}</div>{% endif %}
+      {% for w in d.route.warnings %}<div class="route-tail">※ {{ w }}</div>{% endfor %}
+    </div>
+    {% endif %}
+
+    {% if d.photos %}
+    <div class="subhead"><h3>当日实景</h3></div>
+    <div class="dayphotos">
+      {% for p in d.photos %}
+      <div class="ph">
+        {% if p.uri %}<img class="photo" src="{{ p.uri }}" alt="">{% else %}<div class="noimg">图片暂缺</div>{% endif %}
+        {% if p.caption %}<div class="cap"><b>{{ p.spot }}</b>　{{ p.caption }}</div>{% else %}<div class="cap">{{ p.spot }}</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{# ── 伍 预算核算 ──────────────────────────────── #}
+{% if budget %}
+<section class="sec">
+  <div class="sec-head"><div class="sec-num">伍</div><h2>预算核算</h2></div>
+  <div class="sec-sub">全团口径 · 金额为估算参考</div>
+  <div class="sec-rule"></div>
+  <div class="budget-flex">
+    <div style="flex:1; min-width:0">
+      <table class="tbl">
+        <tr><th>项目</th><th>说明</th><th class="num">金额（元）</th></tr>
+        {% for r in budget.rows %}<tr><td>{{ r.item }}</td><td>{{ r.note }}</td><td class="num">{{ r.amount }}</td></tr>{% endfor %}
+        <tr class="sum"><td>合计</td><td>{{ budget.note }}</td><td class="num">{{ budget.total }}</td></tr>
+      </table>
+    </div>
+    {% if budget.donut %}
+    <div class="donut">
+      {{ budget.donut|safe }}
+      <div class="legend">
+        {% for l in budget.legend %}<div class="li"><span class="sw" style="background:{{ l.color }}"></span>{{ l.label }}　{{ l.amount }}</div>{% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% if budget.stack %}<div class="mt4">{{ budget.stack|safe }}</div>{% endif %}
+  <div class="occupancy" style="--occ:{{ budget.occ_color }}"><i style="width:{{ budget.occ_bar }}"></i></div>
+  <p class="note">{{ budget.occ_disp }}</p>
+  {% for w in budget.warnings %}<p class="note" style="color:var(--red)">※ {{ w }}</p>{% endfor %}
+</section>
+{% endif %}
+
+{# ── 陆 实景速览 ──────────────────────────────── #}
+{% if gallery %}
+<section class="sec" style="break-inside:avoid">
+  <div class="sec-head"><div class="sec-num">陆</div><h2>实景速览</h2></div>
+  <div class="sec-sub">景点实拍与简介 · 先睹为快</div>
+  <div class="sec-rule"></div>
+  <div class="gallery">
+    {% for g in gallery %}
+    <div class="ph">
+      {% if g.uri %}<img class="photo" src="{{ g.uri }}" alt="">{% else %}<div class="noimg">【{{ g.spot }}】图片暂缺</div>{% endif %}
+      {% if g.caption %}<div class="cap"><b>{{ g.spot }}</b>　{{ g.caption }}</div>
+      {% elif g.source_note %}<div class="cap">{{ g.spot }}　<span class="muted">{{ g.source_note }}</span></div>
+      {% else %}<div class="cap">{{ g.spot }}</div>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{# ── 柒 推荐酒店 ──────────────────────────────── #}
+{% if hotels %}
+<section class="sec" style="break-inside:avoid">
+  <div class="sec-head"><div class="sec-num">柒</div><h2>推荐酒店</h2></div>
+  <div class="sec-sub">3 选 · 实景 + 网络评价 · 勾选项已按需求筛选</div>
+  <div class="sec-rule"></div>
+  <div class="hotels">
+    {% for h in hotels %}
+    <div class="card {{ 'rec' if h.selected }}">
+      <div class="hl-top" style="background:{{ ['#7E8E5E', '#C8862A', '#703B52'][loop.index0 if loop.index0 < 3 else 0] }}">
+        {{ "品质之选 · 首推" if h.selected else ("备选 " ~ h.rank) }}
+      </div>
+      {% if h.img_uri %}<img class="wide" src="{{ h.img_uri }}" alt="">{% else %}<div class="imgwrap noimg" style="border:none;border-radius:0">图片暂缺</div>{% endif %}
+      <div class="hl-body">
+        <div class="nm">{{ h.name }}{% if h.selected %}<span class="badge-sel">√ 已勾选</span>{% endif %}</div>
+        <div class="pr">{{ h.meta }}</div>
+        <p class="muted" style="font-size:8.3pt">{{ h.desc }}</p>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{# ── 捌 美食推荐与注意事项 ────────────────────── #}
+<section class="sec">
+  <div class="sec-head"><div class="sec-num">捌</div><h2>美食推荐与注意事项</h2></div>
+  <div class="sec-sub">必吃清单与避坑提醒</div>
+  <div class="sec-rule"></div>
+
+  {% if foods.mode == "notes" %}
+  <div class="foodnotes">
+    {% for f in foods.notes %}
+    <div class="card">
+      {% if f.img_uri %}<img src="{{ f.img_uri }}" alt="">{% else %}<div class="noimg" style="width:38mm;flex:none;height:29mm">图片暂缺</div>{% endif %}
+      <div><div class="nm">{{ f.name }}</div><p class="mt4">{{ f.intro }}</p></div>
+    </div>
+    {% endfor %}
+  </div>
+  {% elif foods.mode == "grid" %}
+  <div class="foodgrid">
+    {% for f in foods.grid %}<div class="fg">{{ f }}</div>{% endfor %}
+  </div>
+  {% else %}
+  <div class="card"><p>{{ foods.text }}</p></div>
+  {% endif %}
+
+  {% if warnings %}
+  <div class="warnbox mt8">
+    <b>注意事项</b>
+    <ul>{% for w in warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+  {% for s in sources %}
+  <p class="srcline">攻略来源[{{ loop.index }}]：{{ s.name }} {{ s.url }}（抓取 {{ s.fetched }}）</p>
+  {% endfor %}
+  {% if defaults %}
+  <p class="srcline" style="color:var(--red)">默认值说明：以下字段由系统按默认值补齐——{{ defaults | join("、") }}</p>
+  {% endif %}
+</section>
+
+{# ── 玖 行前准备（通用建议）────────────────────── #}
+<section class="sec">
+  <div class="sec-head"><div class="sec-num">玖</div><h2>行前准备</h2><span class="generic-tag">通用建议</span></div>
+  <div class="sec-sub">预约倒排与装备清单 · 按行程灵活取舍</div>
+  <div class="sec-rule"></div>
+  <div class="steps">
+    {% for t in pretrip %}
+    <div class="card"><span class="stepnum">{{ loop.index }}</span><b>第 {{ loop.index }} 步</b>　{{ t }}</div>
+    {% endfor %}
+  </div>
+  <div class="subhead"><h3>装备清单</h3><span class="tag">通用建议</span></div>
+  <div class="card">
+    <div class="checkgrid">
+      {% for t, d in checklist %}<div class="ck"><span class="box"></span><b>{{ t }}</b>　{{ d }}</div>{% endfor %}
+    </div>
+  </div>
+</section>
+
+{# ── 拾 应急预案（通用建议）────────────────────── #}
+<section class="sec">
+  <div class="sec-head"><div class="sec-num">拾</div><h2>应急预案</h2><span class="generic-tag">通用建议</span></div>
+  <div class="sec-sub">风险场景与备选方案</div>
+  <div class="sec-rule"></div>
+  <table class="tbl">
+    <tr><th style="width:32%">风险场景</th><th>备选方案</th></tr>
+    {% for s, p in emergencies %}<tr><td><b>{{ s }}</b></td><td>{{ p }}</td></tr>{% endfor %}
+  </table>
+  <p class="footline">本计划由 TripMate 多 Agent 系统生成 · {{ generated_at }} · 车票/酒店请在官方渠道完成支付（系统不接触支付）</p>
+</section>
+
+</body>
+</html>

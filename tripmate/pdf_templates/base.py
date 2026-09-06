@@ -211,7 +211,7 @@ class BaseTripTemplate:
 
     # ---- 渲染入口 ----
 
-    def render(self, profile: TravelProfile, run_id: str, canvasmaker=None) -> str:
+    def render(self, profile: TravelProfile, run_id: str) -> str:
         register_font()
         basic = profile.basic_info
         budget = compute_budget(profile, profile.draft)
@@ -222,8 +222,7 @@ class BaseTripTemplate:
                                 topMargin=15 * mm, bottomMargin=18 * mm,
                                 title=f"TripMate 旅行路书 · {basic.destination}")
         story = self.build_story(profile, budget)
-        kw = {"canvasmaker": canvasmaker} if canvasmaker else {}
-        doc.build(story, onFirstPage=self.decorate_first, onLaterPages=self.decorate_later, **kw)
+        doc.build(story, onFirstPage=self.decorate_first, onLaterPages=self.decorate_later)
         return str(out)
 
     def build_story(self, profile: TravelProfile, budget: dict) -> list:

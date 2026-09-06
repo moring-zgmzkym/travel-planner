@@ -732,10 +732,19 @@ async def _deliver_final(ctx: TeamContext) -> str:
             await ctx.bb.write("routes", merge_review(r, {}), "booking", "定稿保险：路线分区缺失补算")
         except Exception as exc:  # noqa: BLE001 — 保险失败仅记审计，PDF 省略路线版块
             AUDIT.observation("TeamRunner", f"路线定稿保险失败（跳过）：{type(exc).__name__}: {exc}")
+    # to_thread：渲染是同步重活（Chromium 启动 + 排版），内联执行会冻结整个事件循环
+    # （所有会话的推送全停摆）；深拷贝快照隔离渲染期间的用户并发写黑板（阻塞版的
+    # 隐含串行安全性随线程化消失）。on_fallback 在工作线程被调，转事件循环推时间线。
+    loop = asyncio.get_running_loop()
+
+    def _on_fallback(reason: str) -> None:
+        asyncio.run_coroutine_threadsafe(
+            ctx.bus.emit(AGENT_PLANNER, "HTML 渲染失败，已自动降级为备用排版引擎",
+                         "STATUS_FALLBACK"), loop)
+
     path = await asyncio.to_thread(
-        build_pdf, prof.model_copy(deep=True), ctx.run_id, prof.basic_info.template)
-    # to_thread：reportlab 渲染是同步重活，内联执行会冻结整个事件循环（所有会话的推送全停摆）；
-    # 深拷贝快照隔离渲染期间的用户并发写黑板（阻塞版的隐含串行安全性随线程化消失）
+        build_pdf, prof.model_copy(deep=True), ctx.run_id, prof.basic_info.template,
+        _on_fallback)
     orders = []
     total = 0.0
     party = prof.detail_info.party_size or prof.basic_info.party_size or 1
