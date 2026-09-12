@@ -1,4 +1,5 @@
-/* TripMate 前端：WebSocket 双向通信 + 状态时间线 + 草稿/成品渲染（原生 JS，§3.7） */
+/* TripMate 前端：WebSocket 双向通信 + 状态时间线 + 草稿/成品渲染（原生 JS，§3.7）
+   多用户版（2026-09-12）：登录/注册、令牌鉴权、30s WS 票据、PDF/分享/偏好记忆 */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -15,18 +16,97 @@ let welcomeNode = null;    // 欢迎/示例输入（进入页面时保存引用�
 let busyTimer = null;
 let busy = false; // Chatter 处理中（等待回复期间禁止重复发送）
 let reconnected = false; // 是否发生过断线重连（首页首连不提示）
-let sid = localStorage.getItem("tm_sid") || "default"; // 当前会话（需求 2 对话管理）
+let sid = localStorage.getItem("tm_sid") || "default"; // 当前会话（每个账号独立命名空间）
 let etaRange = null; // 当前阶段预计耗时 [下限, 上限] 分钟（STATUS_PHASE 锚定）
+let token = localStorage.getItem("tm_token") || ""; // 登录令牌（多用户版）
+let me = null;
+let authMode = "login";
 
 const AGENT_NAMES = {
   Chatter: "聊天管家", InformationProcessor: "信息处理", Researcher: "信息收集",
   BookingButler: "MCP 专项", Planner: "计划规划", TeamRunner: "调度器",
 };
 
+/* ---------- 认证（多用户版） ---------- */
+function showLogin(msg) {
+  manualClose = true;
+  if (ws) { try { ws.close(); } catch (e) { /* 已断开 */ } }
+  ws = null;
+  $("login-overlay").style.display = "flex";
+  $("auth-error").textContent = msg || "";
+}
+
+function hideLogin() {
+  $("login-overlay").style.display = "none";
+  $("auth-error").textContent = "";
+}
+
+async function authFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers || {},
+    token ? { Authorization: `Bearer ${token}` } : {});
+  const r = await fetch(url, opts);
+  if (r.status === 401) {
+    token = "";
+    localStorage.removeItem("tm_token");
+    showLogin("登录已过期，请重新登录");
+    throw new Error("401");
+  }
+  return r;
+}
+
+async function submitAuth() {
+  const u = $("auth-username").value.trim(), p = $("auth-password").value;
+  if (!u || !p) { $("auth-error").textContent = "请输入用户名和密码"; return; }
+  $("auth-submit").disabled = true;
+  try {
+    const r = await fetch(`/api/${authMode}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: u, password: p }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.status !== 200) { $("auth-error").textContent = data.detail || "操作失败，请重试"; return; }
+    token = data.token;
+    localStorage.setItem("tm_token", token);
+    hideLogin();
+    await boot();
+  } finally {
+    $("auth-submit").disabled = false;
+  }
+}
+
+function setAuthMode(m) {
+  authMode = m;
+  $("tab-login").classList.toggle("on", m === "login");
+  $("tab-register").classList.toggle("on", m === "register");
+  $("auth-submit").textContent = m === "login" ? "登录" : "注册";
+  $("auth-error").textContent = "";
+}
+
+async function boot() {
+  if (!token) { showLogin(); return; }
+  let r;
+  try {
+    r = await authFetch("/api/me");
+  } catch (e) { return; } // 401 已弹登录
+  if (r.status !== 200) { showLogin(); return; }
+  me = await r.json();
+  $("user-name").textContent = me.username + (me.is_admin ? "（管理员）" : "");
+  $("user-bar").style.display = "";
+  refreshMemory();
+  connect();
+}
+
 /* ---------- WebSocket ---------- */
-function connect() {
+async function connect() {
+  if (!token) { showLogin(); return; }
+  let ticket = "";
+  try {
+    const r = await authFetch("/api/ws-ticket", { method: "POST" }); // 30s 短时票据：长期令牌不进 URL
+    if (r.status !== 200) return;
+    ticket = (await r.json()).ticket;
+  } catch (e) { return; } // 401 已弹登录
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws?sid=${encodeURIComponent(sid)}`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?sid=${encodeURIComponent(sid)}&ticket=${encodeURIComponent(ticket)}`);
   ws.onopen = () => {
     $("conn-dot").classList.add("on");
     const chatEl = $("chat");
@@ -56,9 +136,15 @@ function connect() {
     reconnected = true;
     refreshSessions();
   };
-  ws.onclose = () => {
+  ws.onclose = (e) => {
     $("conn-dot").classList.remove("on");
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    if (e.code === 4401) {  // 未认证：票据/令牌失效 → 停自动重连，弹登录
+      token = "";
+      localStorage.removeItem("tm_token");
+      showLogin("登录状态已失效，请重新登录");
+      return;
+    }
     const wasManual = manualClose;
     manualClose = false;
     const delay = wasManual ? 0 : reconnectDelay;
@@ -66,7 +152,10 @@ function connect() {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, delay);  // 自动重连 + 服务端补发（风险 #7）
   };
-  ws.onmessage = (e) => handleMsg(JSON.parse(e.data));
+  ws.onmessage = (e) => {
+    try { handleMsg(JSON.parse(e.data)); }
+    catch (err) { /* 单条非 JSON 帧丢弃，不断链 */ }
+  };
 }
 
 function sendMsg(text) {
@@ -77,7 +166,8 @@ function sendMsg(text) {
 /* ---------- 会话管理（需求 2） ---------- */
 async function refreshSessions() {
   try {
-    const r = await fetch("/api/sessions");
+    const r = await authFetch("/api/sessions");
+    if (!r.ok) return;
     const list = await r.json();
     const sel = $("session-select");
     sel.innerHTML = "";
@@ -113,11 +203,62 @@ function switchSession(nextSid) {
 
 async function createSession() {
   try {
-    const r = await fetch("/api/sessions", { method: "POST" });
+    const r = await authFetch("/api/sessions", { method: "POST" });
+    if (!r.ok) return;
     const it = await r.json();
     await refreshSessions();
     switchSession(it.sid);
   } catch (e) { addTimeline("System", "STATUS_ERROR", "新对话创建失败，请重试。"); }
+}
+
+/* ---------- 偏好记忆（多用户版） ---------- */
+async function refreshMemory() {
+  try {
+    const r = await authFetch("/api/memory");
+    if (!r.ok) return;
+    const data = await r.json();
+    const prefs = data.preferences || [], trips = data.trips || [];
+    const body = $("memory-body");
+    if (!prefs.length && !trips.length) {
+      body.innerHTML = '<span class="memory-empty">暂无沉淀，完成一次规划后自动提炼</span>';
+      return;
+    }
+    body.innerHTML = prefs.map((p) =>
+      `<div class="memory-item"><span>${esc(p.text)}</span>` +
+      `<button class="mini-btn mem-del" data-id="${esc(p.id)}" title="删除该条">✕</button></div>`).join("")
+      + trips.slice(0, 5).map((t) =>
+        `<div class="memory-trip">🧭 ${esc(t.destination || "行程")} · ${esc(t.dates || "")}</div>`).join("");
+    body.querySelectorAll(".mem-del").forEach((b) => b.addEventListener("click", async () => {
+      await authFetch(`/api/memory/${b.dataset.id}`, { method: "DELETE" });
+      refreshMemory();
+    }));
+  } catch (e) { /* 记忆面板失败不影响主流程 */ }
+}
+
+/* ---------- PDF 分享（多用户版） ---------- */
+async function makeShare(card) {
+  try {
+    const r = await authFetch("/api/share", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sid }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.status !== 200) { addTimeline("System", "STATUS_ERROR", data.detail || "分享生成失败"); return; }
+    const abs = location.origin + data.url;
+    const row = card.querySelector(".share-row");
+    row.style.display = "";
+    row.innerHTML = `<input class="share-input" readonly value="${esc(abs)}">` +
+      `<button class="mini-btn share-copy">复制</button>` +
+      `<button class="mini-btn share-revoke">撤销</button>`;
+    row.querySelector(".share-copy").addEventListener("click", (e) => {
+      navigator.clipboard && navigator.clipboard.writeText(abs);
+      e.target.textContent = "已复制";
+    });
+    row.querySelector(".share-revoke").addEventListener("click", async () => {
+      await authFetch(`/api/share/${data.share_id}`, { method: "DELETE" });
+      row.style.display = "none";
+    });
+  } catch (e) { /* 401 已弹登录；其余静默 */ }
 }
 
 /* 路书样式说明：定稿 PDF 统一为 HTML 唐风夜色路书（tripmate/pdf_html），
@@ -176,7 +317,7 @@ function addTimeline(agent, kind, text) {
   div.className = "tl-item k-" + kind;
   div.innerHTML = `<span class="tl-time">${now()}</span>
     <div class="tl-body">
-      <div class="tl-agent a-${agent}">${AGENT_NAMES[agent] || agent}</div>
+      <div class="tl-agent a-${esc(agent)}">${esc(AGENT_NAMES[agent] || agent)}</div>
       <div class="tl-text"></div>
     </div>`;
   div.querySelector(".tl-text").textContent = text;
@@ -197,11 +338,17 @@ function addFinal(m) {
   document.querySelectorAll(".final-card").forEach((n) => n.remove());
   const div = document.createElement("div");
   div.className = "final-card";
+  const pdfHref = esc(m.pdf_url) + (m.pdf_url.includes("?") ? "&" : "?")
+    + "token=" + encodeURIComponent(token); // <a> 导航无法带 Authorization 头，/api/pdf 兼容 query 令牌
   div.innerHTML = `<div class="final-title">🎉 行程计划已生成</div>
-    <a class="btn-pdf" href="${m.pdf_url}" target="_blank">📄 打开 PDF 行程计划</a>
-    <div style="font-size:12px;color:var(--sub)">已勾选订单合计约 ${m.total_price} 元，请在官方渠道逐项确认并支付。</div>`;
+    <a class="btn-pdf" href="${pdfHref}" target="_blank">📄 打开 PDF 行程计划</a>
+    <button class="btn-share">🔗 生成分享链接</button>
+    <div class="share-row" style="display:none"></div>
+    <div class="final-note">已勾选订单合计约 ${esc(m.total_price)} 元，请在官方渠道逐项确认并支付。</div>`;
+  div.querySelector(".btn-share").addEventListener("click", () => makeShare(div));
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
+  refreshMemory(); // 定稿后偏好记忆可能已沉淀
 }
 
 function renderProfile(p) {
@@ -228,12 +375,12 @@ function renderOrders(orders, total) {
   $("orders-total").textContent = `合计 ¥${total}`;
   $("orders-body").innerHTML = (orders || []).map((o) => `
     <div class="order-item ${o.selected ? "sel" : ""}">
-      <span class="o-type">${o.type}</span>${o.selected ? " <span class='chip chip-ok'>✅ 已勾选</span>" : ""}
-      <span class="o-amount">¥${o.amount}</span>
+      <span class="o-type">${esc(o.type)}</span>${o.selected ? " <span class='chip chip-ok'>✅ 已勾选</span>" : ""}
+      <span class="o-amount">¥${esc(o.amount)}</span>
       <div class="o-name">${esc(o.name)}</div>
       ${o.reference_only ? "<div class='ref-tag'>⚠ 参考值（降级数据）</div>" : ""}
       ${o.reason ? `<div class="o-reason">${esc(o.reason)}</div>` : ""}
-      ${o.link ? `<a href="${esc(o.link)}" target="_blank">直达链接 ↗</a>` : ""}
+      ${safeLink(o.link) ? `<a href="${safeLink(o.link)}" target="_blank" rel="noopener">直达链接 ↗</a>` : ""}
     </div>`).join("");
 }
 
@@ -340,7 +487,12 @@ function now() {
   return new Date().toTimeString().slice(0, 8);
 }
 function esc(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function safeLink(u) {
+  const s = String(u || "");
+  return /^https?:\/\//i.test(s) ? esc(s) : ""; // 订单外链仅放行 http/https（防 javascript: 注入）
 }
 
 /* ---------- 发送 ---------- */
@@ -377,5 +529,22 @@ input.addEventListener("keydown", (e) => {
 
 $("session-select").addEventListener("change", (e) => switchSession(e.target.value));
 $("new-session").addEventListener("click", createSession);
+$("logout").addEventListener("click", () => {
+  token = "";
+  localStorage.removeItem("tm_token");
+  location.reload();
+});
+$("tab-login").addEventListener("click", () => setAuthMode("login"));
+$("tab-register").addEventListener("click", () => setAuthMode("register"));
+$("auth-submit").addEventListener("click", submitAuth);
+$("auth-password").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitAuth();
+});
+$("memory-clear").addEventListener("click", async () => {
+  try {
+    await authFetch("/api/memory", { method: "DELETE" });
+    refreshMemory();
+  } catch (e) { /* 401 已弹登录 */ }
+});
 
-connect();
+boot();

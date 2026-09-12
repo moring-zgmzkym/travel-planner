@@ -216,7 +216,10 @@ def test_replay_crash_survives_and_reports(monkeypatch):
         async def send_text(self, raw: str):
             self.sent.append(json.loads(raw))
 
-    s = app.sessions["default"]
+    from tripmate.session import Session
+    import tripmate.gateway.app as app
+    s = Session("default", username="tester")
+    app.sessions["tester/default"] = s
     s.bb.profile.basic_info = BasicInfo(origin="上海", destination="成都", days=2)
     s.bb.profile.draft = Draft(days=[DraftDay(
         date="2026-10-01", morning="熊猫基地", afternoon="宽窄巷子", evening="锦里",

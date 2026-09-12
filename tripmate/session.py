@@ -69,14 +69,19 @@ def _missed_tool_call(reply: str) -> bool:
 
 
 class Session:
-    def __init__(self, sid: str = "") -> None:
+    # 类级默认：部分测试以 Session.__new__ 绕过 __init__ 构造，新属性必须有类级兜底
+    username: str = ""
+    memory_dirty: bool = False
+
+    def __init__(self, sid: str = "", username: str = "") -> None:
         self.sid = sid
+        self.username = username
         self.bb = Blackboard()
         self.bus = StatusBus(replay_limit=ServerConfig.STATUS_REPLAY)
         # 团队完成事件队列：草稿就绪 / 定稿完成 / 错误（由后台任务投递，WS 发送协程消费）
         self.team_events: asyncio.Queue = asyncio.Queue()
         self.runner = TeamRunner(
-            self.bb, self.bus,
+            self.bb, self.bus, username=username,
             on_draft_ready=lambda d: self.team_events.put_nowait(("draft_ready", d)),
             on_completed=lambda f: self.team_events.put_nowait(("completed", f)),
             on_error=lambda e: self.team_events.put_nowait(("error", e)),
@@ -94,12 +99,14 @@ class Session:
         # 会话持久化（2026-09-05）：有 sid 才启用（无 sid 的测试构造不落盘）。
         # 恢复聊天历史 + 画像快照（changelog 置空、版本号保留）——服务重启后
         # 刷新页面聊天记录与草稿/成品卡片经网关补播重现。
+        # 偏好记忆置脏标记（2026-09-12 多用户版）：定稿提炼完成后锁内懒重建 Chatter
+        self.memory_dirty = False
         if sid:
             self._restore()
             self.bb.on_change = self._persist_profile
 
     def _restore(self) -> None:
-        data = load_session(self.sid)
+        data = load_session(self.sid, self.username)
         if not data:
             return
         for m in data.get("chat_history", [])[:200]:
@@ -129,7 +136,7 @@ class Session:
         profile = self.bb.profile.model_dump(mode="json")
         profile.pop("changelog", None)  # 重启后检查点基线重置，旧条目无用且防文件无限膨胀
         chats = list(self._chat_history)
-        await asyncio.to_thread(save_session, self.sid, chats, profile)
+        await asyncio.to_thread(save_session, self.sid, chats, profile, self.username)
 
     async def _flush_once(self) -> None:
         try:
@@ -171,8 +178,11 @@ class Session:
         return list(self._chat_history)
 
     def rebuild_chatter(self) -> None:
-        """重建 Chatter 实例：超时/异常/被取消后丢弃被污染的对话上下文（与既有路径同源）。"""
-        self.chatter = build_chatter(self.bb, self.bus, self.runner)
+        """重建 Chatter 实例：超时/异常/被取消后丢弃被污染的对话上下文（与既有路径同源）；
+        顺带带上最新偏好记忆文本（记忆更新后的热重建也走此处）。"""
+        from .memory import prefs_prompt_text
+        self.chatter = build_chatter(self.bb, self.bus, self.runner,
+                                     memory_text=prefs_prompt_text(self.username))
 
     async def handle_user_message(self, text: str) -> str:
         """用户消息 → 聊天 Agent（串行化：同一时刻仅一次 Chatter 运行）。
@@ -185,6 +195,10 @@ class Session:
         """
         tools_seen: set[str] = set()  # 本轮真正执行过的工具名（判定"宣布启动但工具未执行"）
         async with self.chatter_lock:
+            if self.memory_dirty:
+                # 偏好记忆已更新：锁内热重建（绝不处理中换实例），下条消息即带最新偏好
+                self.memory_dirty = False
+                self.rebuild_chatter()
             try:
                 reply = await asyncio.wait_for(
                     stream_chatter(self.chatter, text, seen_tools=tools_seen), timeout=CHAT_TIMEOUT_S)

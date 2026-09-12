@@ -96,19 +96,22 @@ async def search_guides(destination: str, month_hint: str = "", style_hint: str 
             if isinstance(res, Exception):
                 logger.warning("攻略检索「%s」失败（%s: %s）", name, type(res).__name__, res)
                 continue  # 单来源失败标记暂缺并继续（§4.3）
-            answer = res.get("answer", "")
-            tops = res.get("results", [])[:8]
-            if not tops:
-                continue
-            digest.append({
-                "source_name": f"{name}（Tavily 搜索摘要级）",
-                "source_url": tops[0]["url"] if tops else "",
-                "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "raw_answer": answer[:2000],
-                "raw_titles": [t.get("title", "")[:120] for t in tops],
-                "raw_urls": [t.get("url", "") for t in tops],
-                "reference_only": False,
-            })
+            try:
+                answer = res.get("answer", "")
+                tops = res.get("results", [])[:8]
+                if not tops:
+                    continue
+                digest.append({
+                    "source_name": f"{name}（Tavily 搜索摘要级）",
+                    "source_url": tops[0]["url"] if tops else "",
+                    "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "raw_answer": answer[:2000],
+                    "raw_titles": [t.get("title", "")[:120] for t in tops],
+                    "raw_urls": [t.get("url", "") for t in tops],
+                    "reference_only": False,
+                })
+            except Exception as e:  # noqa: BLE001 — 单路响应畸形（results=null/条目缺键等）只降级该路，不丢其余已成功结果
+                logger.warning("攻略检索「%s」响应解析失败（%s: %s），跳过该路", name, type(e).__name__, e)
         if digest:
             return {"mode": "real", "digest": digest}
     # 降级：模拟攻略摘要（结构化四元 + 来源）

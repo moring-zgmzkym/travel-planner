@@ -97,7 +97,10 @@ def test_sender_survives_relay_crash(monkeypatch):
         async def send_text(self, raw: str):
             self.sent.append(json.loads(raw))
 
-    s = app.sessions["default"]  # 需求 2：会话注册表（原全局 session）
+    from tripmate.session import Session
+    import tripmate.gateway.app as app
+    s = Session("default", username="tester")  # 需求 2：会话注册表按 用户名/sid 键控（多用户版）
+    app.sessions["tester/default"] = s
     _fill_draft(s.bb)
 
     async def boom(*a, **k):

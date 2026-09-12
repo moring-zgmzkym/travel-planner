@@ -298,7 +298,9 @@ async def _day_route(session, budget: _Budget, cache: dict, day, day_index: int,
         dish_l = dishes[day_index % len(dishes)] if dishes else "餐厅"
         lunch = await _meal_stop(session, budget, city, lunch_anchor, "午餐", dish_l, restrictions)
     if lunch is not None:
-        entries.insert(split, (lunch, (lunch.lon, lunch.lat)))
+        # 坐标缺失时置 None（而非 (None, None) 元组）：走下方既有"端点缺坐标→空段占位"路径；
+        # 否则 _haversine 对 None 抛 TypeError 拖垮全天路线，且 (None,None) 为真值会污染晚餐锚点选取
+        entries.insert(split, (lunch, (lunch.lon, lunch.lat) if lunch.lon is not None else None))
     else:
         entries.insert(split, (RouteStop(kind="meal", meal="午餐", name="午餐：自由安排",
                                          note="未找到合适餐厅（可导航至附近商圈）", reference_only=True), None))
@@ -310,7 +312,7 @@ async def _day_route(session, budget: _Budget, cache: dict, day, day_index: int,
         dish_d = dishes[(day_index + 1) % len(dishes)] if dishes else "餐厅"
         dinner = await _meal_stop(session, budget, city, dinner_anchor, "晚餐", dish_d, restrictions)
     if dinner is not None:
-        entries.append((dinner, (dinner.lon, dinner.lat)))
+        entries.append((dinner, (dinner.lon, dinner.lat) if dinner.lon is not None else None))
     else:
         entries.append((RouteStop(kind="meal", meal="晚餐", name="晚餐：自由安排",
                                   note="未找到合适餐厅（可导航至附近商圈）", reference_only=True), None))

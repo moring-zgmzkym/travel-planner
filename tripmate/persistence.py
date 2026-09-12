@@ -36,13 +36,18 @@ def safe_sid(sid: str) -> str:
     return "junk-" + hashlib.md5(sid.encode()).hexdigest()[:8]
 
 
-def session_path(sid: str):
-    return SESSIONS_DIR / f"{safe_sid(sid)}.json"
+def session_path(sid: str, username: str = ""):
+    """会话文件路径。带用户名 → sessions/{用户名}/{sid}.json（多用户隔离，2026-09-12）；
+    无用户名 → 旧扁平路径 sessions/{sid}.json（兼容既有测试与直调场景）。"""
+    safe = safe_sid(sid)
+    if username:
+        return SESSIONS_DIR / username / f"{safe}.json"
+    return SESSIONS_DIR / f"{safe}.json"
 
 
-def load_session(sid: str) -> dict | None:
+def load_session(sid: str, username: str = "") -> dict | None:
     """读取持久化状态；不存在/损坏返回 None（按全新会话处理，绝不抛异常）。"""
-    path = session_path(sid)
+    path = session_path(sid, username)
     try:
         if not path.exists():
             return None
@@ -53,11 +58,12 @@ def load_session(sid: str) -> dict | None:
         return None
 
 
-def save_session(sid: str, chat_history: list[dict], profile: dict) -> None:
+def save_session(sid: str, chat_history: list[dict], profile: dict, username: str = "") -> None:
     """原子写入会话状态；失败只记日志，绝不影响聊天/规划主流程。"""
-    path = session_path(sid)
+    path = session_path(sid, username)
     tmp = path.with_name(path.name + f".{uuid.uuid4().hex[:8]}.tmp")
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps({
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "chat_history": chat_history,

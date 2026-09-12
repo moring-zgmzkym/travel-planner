@@ -17,8 +17,10 @@ GAS_PRICE_PER_KM = 0.8      # 自驾油费+过路估算（元/km，参考值）
 BUS_PRICE_PER_KM = 0.35     # 长途大巴（元/km，参考值）
 
 
-async def query_tickets(origin: str, destination: str, dates: list[str], mode: str) -> dict:
-    """车票查询入口。高铁→12306-MCP；飞机→无 MCP 走搜索摘要级参考；自驾/大巴→里程估算。"""
+async def query_tickets(origin: str, destination: str, dates: list[str], mode: str,
+                        party: int = 1) -> dict:
+    """车票查询入口。高铁→12306-MCP；飞机→无 MCP 走搜索摘要级参考；自驾/大巴→里程估算。
+    大巴票价随人数线性增长，按全团折算（自驾按车计费不乘人数）；预算核算按"往返合计，全团"口径。"""
     date = dates[0] if dates else datetime.now().strftime("%Y-%m-%d")
     if mode == "自驾":
         km = mock_transport_estimate_km(origin, destination)
@@ -27,8 +29,10 @@ async def query_tickets(origin: str, destination: str, dates: list[str], mode: s
                 "transport_kind": "estimate"}
     if mode == "长途大巴":
         km = mock_transport_estimate_km(origin, destination)
-        return {"mode": "mock", "notice": "长途大巴：按往返里程 × 票价率估算（参考值）",
-                "candidates": [_estimate_ticket("长途大巴（往返）", km * 2 * BUS_PRICE_PER_KM)],
+        party_n = max(1, int(party or 1))
+        return {"mode": "mock",
+                "notice": f"长途大巴：按往返里程 × 票价率 × {party_n} 人估算（参考值）",
+                "candidates": [_estimate_ticket("长途大巴（往返）", km * 2 * BUS_PRICE_PER_KM * party_n)],
                 "transport_kind": "estimate"}
     if mode == "飞机":
         return {"mode": "mock", "notice": "暂无机票 MCP，按 §7 降级走搜索摘要级参考数据（价格仅供参考）",

@@ -323,21 +323,26 @@ def _fake_result(payload='{"ok": 1}'):
 
 
 def test_pool_reuses_session_and_falls_back_to_short_session():
-    """池启用：同通道工厂返回同一持久会话；池关闭后回退原短会话路径。"""
+    """池启用：同通道工厂返回同一持久会话；池关闭后回退原短会话路径。
+    （begin/end 须在同一异步上下文内：ContextVar 的 reset 只作用于本上下文——
+    生产路径 begin/end 同在 _run_phase 协程内，语义一致。）"""
     import asyncio
     from tripmate.tools import mcp_client as m
 
-    m.begin_mcp_pool()
-    try:
-        s1 = m.train_session()
-        s2 = m.train_session()
-        assert s1 is s2 and isinstance(s1, m.PersistentMcpSession)
-        assert m._pool_get("12306") is s1
-    finally:
-        asyncio.run(m.end_mcp_pool())
-    assert m._ACTIVE_POOL is None
-    s3 = m.train_session()
-    assert type(s3) is m.McpSession  # 池未启用 → 原短会话行为（每次调用全新握手）
+    async def main():
+        m.begin_mcp_pool()
+        try:
+            s1 = m.train_session()
+            s2 = m.train_session()
+            assert s1 is s2 and isinstance(s1, m.PersistentMcpSession)
+            assert m._pool_get("12306") is s1
+        finally:
+            await m.end_mcp_pool()
+        assert m._POOL_CTX.get() is None
+        s3 = m.train_session()
+        assert type(s3) is m.McpSession  # 池未启用 → 原短会话行为（每次调用全新握手）
+
+    asyncio.run(main())
 
 
 def test_persistent_call_success_keeps_session():

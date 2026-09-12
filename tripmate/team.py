@@ -385,7 +385,8 @@ def make_booking_tools(ctx: TeamContext):
         async def _query() -> dict:
             await ctx.bus.emit(AGENT_MCP, f"车票查询中…（{basic.origin}→{basic.destination}｜{basic.travel_mode}）", "STATUS_MCP")
             r = await query_tickets(basic.origin or "", basic.destination or "",
-                                    basic.travel_dates or [], basic.travel_mode or "高铁")
+                                    basic.travel_dates or [], basic.travel_mode or "高铁",
+                                    party=_party(prof))
             tag = "已查到班次" if r["candidates"] else "无候选"
             await ctx.bus.emit(AGENT_MCP, f"车票查询完成：{tag}（{'降级参考值' if r['mode'] == 'mock' else 'MCP 实时'}）", "STATUS_MCP")
             return r
@@ -403,7 +404,8 @@ def make_booking_tools(ctx: TeamContext):
             await ctx.bus.emit(AGENT_MCP, f"酒店查询中…（{basic.destination}｜{detail.hotel.location_pref or '市中心'}）", "STATUS_MCP")
             r = await query_hotels(basic.destination or "", detail.hotel.location_pref,
                                    detail.hotel.price_range, basic.budget,
-                                   dates=basic.travel_dates or [])
+                                   dates=basic.travel_dates or [],
+                                   party=detail.party_size or basic.party_size or 2)
             await ctx.bus.emit(AGENT_MCP, f"酒店查询完成：{len(r['candidates'])} 家候选", "STATUS_MCP")
             return r
 
@@ -786,9 +788,11 @@ class TeamRunner:
     def __init__(self, bb: Blackboard, bus: StatusBus,
                  on_draft_ready: Callable[[Draft], None] | None = None,
                  on_completed: Callable[[FinalDelivery], None] | None = None,
-                 on_error: Callable[[str], None] | None = None) -> None:
+                 on_error: Callable[[str], None] | None = None,
+                 username: str = "") -> None:
         self.bb = bb
         self.bus = bus
+        self.username = username  # 偏好记忆按用户读写（多用户版，2026-09-12）
         self.on_draft_ready = on_draft_ready
         self.on_completed = on_completed
         self.on_error = on_error
@@ -1068,7 +1072,8 @@ class TeamRunner:
         if not prof.tickets and basic.origin and basic.destination:
             try:
                 tr = await query_tickets(basic.origin, basic.destination,
-                                         basic.travel_dates or [], basic.travel_mode or "高铁")
+                                         basic.travel_dates or [], basic.travel_mode or "高铁",
+                                         party=party)
                 tickets = [TicketCandidate(**t) for t in score_tickets(tr["candidates"], party)]
                 await self.bb.write("tickets", tickets, "booking", "护栏补齐：车票分区缺失")
                 await self.bus.emit("TeamRunner", "护栏：车票候选已由确定性通道补齐", "STATUS_CHECKPOINT")
@@ -1079,7 +1084,8 @@ class TeamRunner:
             try:
                 hr = await query_hotels(basic.destination, detail.hotel.location_pref,
                                         detail.hotel.price_range, basic.budget,
-                                        dates=basic.travel_dates or [])
+                                        dates=basic.travel_dates or [],
+                                        party=detail.party_size or basic.party_size or 2)
                 hotels = [HotelCandidate(**h) for h in score_hotels(hr["candidates"], detail.hotel.price_range)]
                 await self.bb.write("hotels", hotels, "booking", "护栏补齐：酒店分区缺失")
                 await self.bus.emit("TeamRunner", "护栏：酒店候选已由确定性通道补齐", "STATUS_CHECKPOINT")
@@ -1192,6 +1198,12 @@ class TeamRunner:
 
     def _build_team(self, ctx: TeamContext, phase: str) -> SelectorGroupChat:
         client = get_model_client()
+
+        def _memory_prompt_text() -> str:
+            # 每次建队即时读取偏好记忆（记忆在定稿后更新，无需外部通知；无用户/无偏好为空串）
+            from .memory import prefs_prompt_text
+            return prefs_prompt_text(self.username)
+
         proc = AssistantAgent(
             AGENT_PROC, model_client=client, tools=make_processor_tools(ctx),
             system_message=prompts.team_system_prompt(prompts.PROCESSOR_PROMPT),
@@ -1206,7 +1218,8 @@ class TeamRunner:
             reflect_on_tool_use=True)
         planner = AssistantAgent(
             AGENT_PLANNER, model_client=client, tools=make_planner_tools(ctx),
-            system_message=prompts.team_system_prompt(prompts.PLANNER_PROMPT),
+            system_message=prompts.team_system_prompt(prompts.PLANNER_PROMPT)
+            + _memory_prompt_text(),
             reflect_on_tool_use=True)
         marker = MARKER_FINAL if phase == "finalize" else MARKER_DONE
         ready_section = "final" if phase == "finalize" else "draft"
@@ -1406,6 +1419,7 @@ def _changed_fields(changes) -> list[str]:
 def _fallback_draft(prof: TravelProfile) -> Draft:
     """确定性兜底草稿：攻略经典路线 + 必经景点硬约束 + 节奏约束（护栏用，不依赖 LLM）。"""
     from .mocks.data import expand_dates
+    from datetime import date
     kb = kb_for_city(prof.basic_info.destination or "")
     days = prof.basic_info.days or 3
     lo, _hi = PACE_SPOTS.get(prof.detail_info.pace or "中", (3, 3))
@@ -1424,7 +1438,7 @@ def _fallback_draft(prof: TravelProfile) -> Draft:
             "上午", "下午", "晚上", "中午", "清晨", "继续", "周边", "上午)", "下午)",
             "自由活动", "漫步", "上午→", "火锅", "小吃", "夜景", "午餐", "晚餐")
     pool = [s for s in pool if s and not any(j in s for j in junk)][: days * lo * 2]
-    dates = prof.basic_info.travel_dates or expand_dates("2026-10-01", days)
+    dates = prof.basic_info.travel_dates or expand_dates(date.today().isoformat(), days)
     dd = []
     idx = 0
     for i in range(days):

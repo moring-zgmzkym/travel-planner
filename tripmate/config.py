@@ -14,7 +14,8 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 IMAGE_DIR = OUTPUT_DIR / "images"
 LOG_DIR = BASE_DIR / "logs"
 SESSIONS_DIR = BASE_DIR / "sessions"  # 会话持久化（聊天历史+画像快照，2026-09-05）
-for _d in (OUTPUT_DIR, IMAGE_DIR, LOG_DIR, SESSIONS_DIR):
+DATA_DIR = BASE_DIR / "data"          # 多用户数据（账号/密钥/分享/记忆，2026-09-12；不入 git）
+for _d in (OUTPUT_DIR, IMAGE_DIR, LOG_DIR, SESSIONS_DIR, DATA_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 

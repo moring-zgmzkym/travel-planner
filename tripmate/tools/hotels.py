@@ -98,10 +98,13 @@ async def _hotel_review(client: httpx.AsyncClient, name: str, city: str) -> str:
 
 
 async def query_hotels(city: str, location_pref: str | None, price_range: list[float] | None,
-                       budget_hint: float | None = None, dates: list[str] | None = None) -> dict:
-    """酒店候选查询：真实酒店 MCP 优先（Dida），未配置/失败降级模拟酒店库（标注参考值）。"""
+                       budget_hint: float | None = None, dates: list[str] | None = None,
+                       party: int = 2) -> dict:
+    """酒店候选查询：真实酒店 MCP 优先（Dida），未配置/失败降级模拟酒店库（标注参考值）。
+    party 为入住人数（无画像信息时保守沿用历史默认 2 人）。"""
     notice = None
     candidates: list[dict] = []
+    party_n = max(1, int(party or 2))
     # Dida 的 price.lowestPrice 是 stayNights 晚的总价，单价须按晚数折算
     nights = max(1, len(dates) - 1) if dates else 1
     if McpConfig.MCP_HOTEL_URL:
@@ -110,12 +113,13 @@ async def query_hotels(city: str, location_pref: str | None, price_range: list[f
 
             async def _q() -> list:
                 # Dida searchHotels 嵌套参数；mcp_client 的 schema 过滤只比对顶层键，嵌套 dict 原样透传
-                demand = f"{city} {location_pref} 酒店，2人入住" if location_pref else f"{city} 酒店，2人入住"
+                demand = (f"{city} {location_pref} 酒店，{party_n}人入住" if location_pref
+                          else f"{city} 酒店，{party_n}人入住")
                 args: dict = {"place": city, "placeType": "城市", "originQuery": demand, "size": 8}
                 checkin = next((d for d in (dates or []) if len(d) == 10 and d[4] == "-" and d[7] == "-"), "")
                 if checkin:
                     args["checkInParam"] = {"checkInDate": checkin,
-                                            "stayNights": nights, "adultCount": 2}
+                                            "stayNights": nights, "adultCount": party_n}
                 # 关键词必须唯一切中 searchHotels：getHotelSearchTags 同样含
                 # "hotel"+"search" 且在 list_tools 里排在它前面，宽泛关键词会误中
                 return await session.call(("searchhotels",), args, what="酒店查询")
@@ -160,6 +164,9 @@ async def query_hotels(city: str, location_pref: str | None, price_range: list[f
         filtered.append(c)
     if not filtered:  # 区间内无候选时回退全量并提示
         filtered = candidates
+        for c in filtered:
+            # 回退候选未经 _distance_km 实算，占位 1km 不得冒充真实距离参与归一/展示（§7 估算标注）
+            c.setdefault("distance_estimated", True)
         notice = (notice or "") + "｜注意：价格区间内无候选，已放宽为全部候选"
     return {"mode": mode, "notice": notice if notice else None, "candidates": filtered[:5]}
 
@@ -279,6 +286,10 @@ def _normalize_hotels(raw: object, nights: int = 1) -> list[dict]:
     rows = raw if isinstance(raw, list) else []
     if isinstance(raw, dict):
         rows = raw.get("hotels") or raw.get("data") or raw.get("result") or []
+    if isinstance(rows, dict):
+        rows = [rows]  # 单对象包装成列表（与 tickets 同型防御），防 rows[:10] TypeError 绕过 mock 降级
+    elif not isinstance(rows, list):
+        rows = []
     out = []
     for r in rows[:10]:
         if not isinstance(r, dict):

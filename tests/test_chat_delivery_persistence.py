@@ -36,8 +36,18 @@ class _BoomWS:
 
 
 def _no_save(monkeypatch):
-    """default 会话被测试复用：短路落盘，不污染开发者 sessions/default.json。"""
+    """default 会话被测试复用：短路落盘，不污染开发者落盘数据。"""
     monkeypatch.setattr("tripmate.session.save_session", lambda *a, **k: None)
+
+
+def _gw_session(username: str = "tester", sid: str = "default"):
+    """多用户版取测试会话：注入 app.sessions（旧版全局 default 会话已随多用户化移除）。"""
+    from tripmate.session import Session
+    import tripmate.gateway.app as app
+    key = app._skey(username, sid)
+    if key not in app.sessions:
+        app.sessions[key] = Session(app._sid_of(key), username=username)
+    return app.sessions[key]
 
 
 def _fill_draft(bb):
@@ -108,10 +118,14 @@ def test_session_without_sid_never_saves(monkeypatch):
     assert calls["n"] == 0 and s.sid == ""
 
 
-def test_default_session_carries_sid():
-    """【关键修正回归】default 会话必须带 sid 构造，否则无 ?sid 的单用户场景永不落盘。"""
+def test_gateway_sessions_are_user_scoped_and_carry_sid():
+    """【多用户版关键回归】网关会话键=用户名/sid，且会话一律带 sid+username（落盘/隔离前提）。"""
     import tripmate.gateway.app as app
-    assert app.sessions["default"].sid == "default"
+    key, s = app._get_session("tester", "default")
+    assert key == "tester/default" and s.sid == "default" and s.username == "tester"
+    # 隔离：另一用户同 sid 是不同会话对象
+    _, other = app._get_session("someone-else", "default")
+    assert other is not s
 
 
 # ---- 迟到回复送达当前活动连接 ----
@@ -120,7 +134,7 @@ def test_late_reply_reaches_live_connection(monkeypatch):
     _no_save(monkeypatch)
     import tripmate.gateway.app as app
 
-    s = app.sessions["default"]
+    s = _gw_session()
     new_ws = _FakeWS("new")
     s._live_ws = new_ws  # 模拟：用户已刷新，旧处理协程还在跑
     msg = {"type": "chat", "role": "chatter", "text": "迟到的回复"}
@@ -139,7 +153,7 @@ def test_sender_handoff_no_duplicate_no_loss(monkeypatch):
     _no_save(monkeypatch)
     import tripmate.gateway.app as app
 
-    s = app.sessions["default"]
+    s = _gw_session()
     _fill_draft(s.bb)
 
     async def ok_relay(note):
@@ -190,7 +204,7 @@ def test_sender_idle_timeout_exits(monkeypatch):
     import tripmate.gateway.app as app
     monkeypatch.setattr(app, "_SENDER_IDLE_TIMEOUT_S", 0.05)
 
-    s = app.sessions["default"]
+    s = _gw_session()
 
     async def main():
         ws_a = _FakeWS("A")
@@ -209,7 +223,7 @@ def test_replay_skips_broken_draft_keeps_connection(monkeypatch):
     """坏草稿（持久化后跨重启存活）：只跳过草稿卡片，历史/画像照常补播、连接保留。"""
     import tripmate.gateway.app as app
 
-    s = app.sessions["default"]
+    s = _gw_session()
     _fill_draft(s.bb)
 
     def boom(sess):
@@ -232,7 +246,7 @@ def test_replay_history_failure_closes_connection(monkeypatch):
     """核心历史补播失败（连接不可信）：返回 False 由调用方关闭。"""
     import tripmate.gateway.app as app
 
-    s = app.sessions["default"]
+    s = _gw_session()
 
     def boom():
         raise RuntimeError("画像快照崩溃（模拟）")
@@ -255,7 +269,7 @@ def test_flush_coalesces_writes(monkeypatch):
 
     saved = []
 
-    def fake_save(sid, chats, profile):
+    def fake_save(sid, chats, profile, username=""):
         calls["n"] += 1
         saved.append(profile)
 

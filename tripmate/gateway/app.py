@@ -1,24 +1,36 @@
-"""FastAPI 网关（§3.1）：WebSocket 双向通信（聊天输入 + STATUS_* 状态推送）+ 静态资源。
+"""FastAPI 网关（§3.1）——多用户版（2026-09-12）。
 
-需求 2（2026-08-30）：多会话对话管理——每个会话独立 Session（黑板/团队/聊天），
-WS 以 ?sid= 绑定会话，切换会话=换 sid 重连（服务端补播该会话历史）。
-内存态：服务重启后会话丢失（MVP 边界，README 已注明）。
+- 认证：/api/register、/api/login、/api/me、/api/ws-ticket、/share/{id} 公开或半公开；
+  其余 /api/* 与 WebSocket 一律要求登录（Bearer 令牌 / 30s WS 票据，见 auth.py）。
+- 会话隔离：注册表按 "用户名/sid" 键控，/api/* 只见本人会话；持久化 sessions/{用户名}/{sid}.json；
+  首个注册用户一次性继承旧单用户数据（sessions/*.json 平移，只移动不重写）。
+- PDF 交付：无鉴权的 /outputs 静态挂载已移除 → GET /api/pdf?sid=（登录+归属，
+  文件名一律服务端从该会话定稿记录派生，路径参数面归零）；/share/{id} 免登录直链（可撤销）。
+- 偏好记忆：定稿事件触发后台提炼（memory.py，失败不影响主流程）；/api/memory 管理端点。
+- 内存态：服务重启后会话丢失（磁盘快照自动恢复），与旧版一致。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
+import secrets
+import time
 import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from ..config import BASE_DIR, OUTPUT_DIR, ServerConfig
+from .. import auth
+from ..config import BASE_DIR, OUTPUT_DIR, ServerConfig, SESSIONS_DIR
 from ..llm import usage_summary
+from .. import maintenance
+from .. import memory
 from ..pdf_templates import get_template, list_templates
 from ..planning import compute_budget
 from ..session import Session
@@ -29,7 +41,18 @@ from ..persistence import safe_sid
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """停机钩子：等待/补写所有会话的在途异步落盘（防抖后的尾随增量不丢）。"""
+    """启动钩子：自动清理 outputs 中确定无引用的产物（保护窗内绝不删，失败不阻塞启动）。
+    停机钩子：等待/补写所有会话的在途异步落盘（防抖后的尾随增量不丢）。"""
+    try:
+        plan = maintenance.plan_cleanup()   # 默认保护窗：无引用 PDF 3 天 / 无引用图 24h
+        if plan.total_files:
+            result = maintenance.apply(plan)
+            AUDIT.output("Gateway", f"启动清理：删除 {len(result.deleted)} 个无用文件，"
+                                    f"释放 {result.freed_bytes / 1e6:.1f} MB")
+    except maintenance.MaintenanceAborted as e:
+        AUDIT.output("Gateway", f"启动清理中止（fail-closed，不影响服务）：{e}")
+    except Exception as e:  # noqa: BLE001 — 清理失败绝不影响服务
+        AUDIT.output("Gateway", f"启动清理失败（不影响服务）：{type(e).__name__}: {e}")
     yield
     for sess in sessions.values():
         try:
@@ -46,19 +69,88 @@ _SENDER_IDLE_TIMEOUT_S = 60.0
 _env = Environment(loader=FileSystemLoader(BASE_DIR / "tripmate" / "templates"),
                    autoescape=select_autoescape(["html"]))
 
-# ---- 会话注册表（需求 2）----
-DEFAULT_SID = "default"
-# default 会话带 sid 构造：持久化启用（无 ?sid 的单用户场景也要落盘/重启恢复，2026-09-05）
-sessions: dict[str, Session] = {DEFAULT_SID: Session(DEFAULT_SID)}
+# ---- 会话注册表（多用户隔离）：键 = "用户名/sid"，两个成分都经过硬校验 ----
+sessions: dict[str, Session] = {}
 
 
-def _get_session(sid: str | None) -> tuple[str, Session]:
-    """按 sid 取会话；sid 经白名单校验（非法 → junk-{md5} 脱敏键，防路径穿越且不污染 default）；
-    未知合法 sid 视为新会话注册（前端切换/刷新天然幂等，持久化状态自动恢复）。"""
-    key = safe_sid(sid or "")
+def _skey(username: str, sid: str) -> str:
+    return f"{username}/{safe_sid(sid or '')}"
+
+
+def _sid_of(key: str) -> str:
+    return key.split("/", 1)[1]
+
+
+def _get_session(username: str, sid: str | None) -> tuple[str, Session]:
+    """按用户+sid 取会话；未知合法组合视为新会话注册（前端切换/刷新天然幂等，状态自动恢复）。"""
+    key = _skey(username, sid or "")
     if key not in sessions:
-        sessions[key] = Session(key)
+        sessions[key] = Session(safe_sid(sid or ""), username=username)
     return key, sessions[key]
+
+
+# ---- 认证 ----
+
+async def _auth_user(request: Request) -> str:
+    header = request.headers.get("authorization") or ""
+    token = header[7:].strip() if header.lower().startswith("bearer ") \
+        else (request.query_params.get("token") or "")
+    username = auth.verify_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="未登录或登录已过期")
+    return username
+
+
+async def _migrate_legacy_sessions(username: str) -> None:
+    """首个注册用户继承旧单用户数据：平移 sessions/*.json 到其名下（只移动不重写，失败不阻塞）。"""
+    try:
+        legacy = [p for p in SESSIONS_DIR.glob("*.json")]
+        if not legacy:
+            return
+        target = SESSIONS_DIR / username
+        target.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for p in legacy:
+            dest = target / p.name
+            if not dest.exists():
+                p.replace(dest)
+                moved += 1
+        if moved:
+            AUDIT.output("Gateway", f"已向首个用户 {username} 迁移 {moved} 个旧会话文件")
+    except OSError as e:
+        AUDIT.output("Gateway", f"旧会话迁移失败（{type(e).__name__}: {e}），不影响注册")
+
+
+@app.post("/api/register")
+async def register(payload: dict = Body(...)) -> JSONResponse:
+    try:
+        result = await auth.register(str(payload.get("username") or ""),
+                                     str(payload.get("password") or ""))
+    except auth.AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    await _migrate_legacy_sessions(result["username"])
+    return JSONResponse(result)
+
+
+@app.post("/api/login")
+async def login(payload: dict = Body(...)) -> JSONResponse:
+    try:
+        result = await auth.login(str(payload.get("username") or ""),
+                                  str(payload.get("password") or ""))
+    except auth.AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return JSONResponse(result)
+
+
+@app.get("/api/me")
+async def me(user: str = Depends(_auth_user)) -> JSONResponse:
+    return JSONResponse(auth.user_info(user) or {"username": user, "is_admin": False})
+
+
+@app.post("/api/ws-ticket")
+async def ws_ticket(user: str = Depends(_auth_user)) -> JSONResponse:
+    """换 30 秒 WS 握手票据：长期令牌不进 URL（浏览器 WebSocket 无法带 Authorization 头）。"""
+    return JSONResponse({"ticket": auth.issue_ws_ticket(user)})
 
 
 def _session_title(sess: Session) -> str:
@@ -77,7 +169,6 @@ def _session_title(sess: Session) -> str:
 
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
-app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -86,35 +177,158 @@ async def index() -> HTMLResponse:
 
 
 @app.get("/api/sessions")
-async def list_sessions() -> JSONResponse:
-    return JSONResponse([{"sid": k, "title": _session_title(v)} for k, v in sessions.items()])
+async def list_sessions(user: str = Depends(_auth_user)) -> JSONResponse:
+    out = [{"sid": _sid_of(key), "title": _session_title(sess)}
+           for key, sess in sessions.items() if key.split("/", 1)[0] == user]
+    return JSONResponse(out)
 
 
 @app.post("/api/sessions")
-async def create_session() -> JSONResponse:
+async def create_session(user: str = Depends(_auth_user)) -> JSONResponse:
     sid = f"s-{uuid.uuid4().hex[:8]}"
-    # 必须带 sid 构造：无 sid 的 Session 持久化全关，"新建对话"的数据会在重启后蒸发
-    # （2026-09-05 default 会话已修复，此入口漏网——同型事故不得复发）
-    sessions[sid] = Session(sid)
-    return JSONResponse({"sid": sid, "title": _session_title(sessions[sid])})
+    key = _skey(user, sid)
+    sessions[key] = Session(safe_sid(sid), username=user)
+    return JSONResponse({"sid": sid, "title": _session_title(sessions[key])})
 
 
 @app.get("/api/profile")
-async def profile(sid: str = DEFAULT_SID) -> JSONResponse:
-    _, sess = _get_session(sid)
+async def profile(sid: str = "default", user: str = Depends(_auth_user)) -> JSONResponse:
+    _, sess = _get_session(user, sid)
     return JSONResponse(sess.profile_snapshot())
 
 
 @app.get("/api/usage")
-async def usage() -> JSONResponse:
-    # 用量是进程级（共享模型客户端），不分会话
+async def usage(sid: str | None = None, user: str = Depends(_auth_user)) -> JSONResponse:
+    """带 sid → 该会话当前规划 run 的消耗（per-run 基线，多用户互不污染）；
+    不带 → 进程累计总量。"""
+    if sid:
+        _, sess = _get_session(user, sid)
+        return JSONResponse(usage_summary(sess.runner._usage_baseline))
     return JSONResponse(usage_summary())
 
 
 @app.get("/api/templates")
 async def templates() -> JSONResponse:
-    """PDF 模板列表（前端下拉选择；定稿时按黑板 basic_info.template 渲染）。"""
+    """PDF 模板列表（定稿时按黑板 basic_info.template 渲染）。"""
     return JSONResponse({"templates": list_templates()})
+
+
+def _final_pdf_basename(sess: Session) -> str | None:
+    """会话当前成品 PDF 文件名（从定稿记录取 basename，路径参数面归零）。"""
+    final = sess.bb.profile.final
+    if not final or not final.pdf_url:
+        return None
+    name = final.pdf_url.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return name if name.lower().endswith(".pdf") else None
+
+
+def _api_pdf_url(sid: str, sess: Session) -> str | None:
+    name = _final_pdf_basename(sess)
+    if not name:
+        return None
+    return f"/api/pdf?sid={quote(safe_sid(sid or 'default'))}"
+
+
+@app.get("/api/pdf")
+async def serve_pdf(sid: str = "default", user: str = Depends(_auth_user)):
+    _, sess = _get_session(user, sid)
+    name = _final_pdf_basename(sess)
+    path = OUTPUT_DIR / name if name else None
+    if not name or path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="该会话还没有成品 PDF")
+    return FileResponse(path, media_type="application/pdf", filename=name)
+
+
+# ---- PDF 分享直链（免登录，链接即凭证；创建时快照文件名） ----
+
+from ..maintenance import SHARES_PATH as _SHARES_PATH  # noqa: E402 — 分享索引与清理共用同一常量
+_SHARE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_share_lock = asyncio.Lock()
+
+
+def _load_shares() -> dict:
+    try:
+        if not _SHARES_PATH.exists():
+            return {}
+        data = json.loads(_SHARES_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError) as e:
+        AUDIT.output("Gateway", f"分享索引读取失败（{type(e).__name__}: {e}），按空处理")
+        return {}
+
+
+def _save_shares(shares: dict) -> None:
+    tmp = _SHARES_PATH.with_name(_SHARES_PATH.name + f".{secrets.token_hex(4)}.tmp")
+    tmp.write_text(json.dumps(shares, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(_SHARES_PATH)
+
+
+@app.post("/api/share")
+async def create_share(payload: dict = Body(...), user: str = Depends(_auth_user)) -> JSONResponse:
+    sid = str(payload.get("sid") or "default")
+    _, sess = _get_session(user, sid)
+    safe = safe_sid(sid)
+    name = _final_pdf_basename(sess)
+    if not name:
+        raise HTTPException(status_code=404, detail="该会话还没有成品 PDF 可分享")
+    async with _share_lock:
+        shares = _load_shares()
+        for share_id, info in shares.items():  # 幂等：同会话同文件复用现有未撤销链接
+            if (not info.get("revoked") and info.get("user") == user
+                    and info.get("sid") == safe and info.get("file") == name):
+                return JSONResponse({"share_id": share_id, "url": f"/share/{share_id}"})
+        share_id = secrets.token_urlsafe(12)
+        shares[share_id] = {"user": user, "sid": safe, "file": name,
+                            "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        _save_shares(shares)
+    return JSONResponse({"share_id": share_id, "url": f"/share/{share_id}"})
+
+
+@app.delete("/api/share/{share_id}")
+async def revoke_share(share_id: str, user: str = Depends(_auth_user)) -> JSONResponse:
+    if not _SHARE_ID_RE.match(share_id):
+        raise HTTPException(status_code=404, detail="分享不存在")
+    async with _share_lock:
+        shares = _load_shares()
+        info = shares.get(share_id)
+        if not info or info.get("user") != user:
+            raise HTTPException(status_code=404, detail="分享不存在")
+        info["revoked"] = True
+        _save_shares(shares)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/share/{share_id}")
+async def get_share(share_id: str):
+    """免登录分享直链：链接即凭证（不可猜测 id）；撤销后 404。"""
+    if not _SHARE_ID_RE.match(share_id):
+        raise HTTPException(status_code=404, detail="分享不存在或已撤销")
+    info = _load_shares().get(share_id)
+    file = (info or {}).get("file") or ""
+    if (info or {}).get("revoked") or not file or "/" in file or "\\" in file or not file.lower().endswith(".pdf"):
+        raise HTTPException(status_code=404, detail="分享不存在或已撤销")
+    path = OUTPUT_DIR / file
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="文件已不存在")
+    return FileResponse(path, media_type="application/pdf", filename=file)
+
+
+# ---- 偏好记忆管理 ----
+
+@app.get("/api/memory")
+async def get_memory(user: str = Depends(_auth_user)) -> JSONResponse:
+    return JSONResponse(memory.load_memory(user))
+
+
+@app.delete("/api/memory/{pref_id}")
+async def delete_memory(pref_id: str, user: str = Depends(_auth_user)) -> JSONResponse:
+    return JSONResponse({"ok": memory.delete_preference(user, pref_id)})
+
+
+@app.delete("/api/memory")
+async def clear_memory(user: str = Depends(_auth_user)) -> JSONResponse:
+    memory.clear_memory(user)
+    return JSONResponse({"ok": True})
 
 
 def _render_draft_html(sess: Session) -> str:
@@ -177,6 +391,16 @@ async def _push_stream_error(sess: Session, text: str) -> None:
         pass
 
 
+async def _capture_memory(sess: Session) -> None:
+    """定稿后沉淀偏好记忆（后台任务，失败不影响任何主流程）；成功则置脏等下次消息热重建。"""
+    try:
+        ok = await memory.capture_from_profile(sess.username, sess.bb.profile)
+        if ok:
+            sess.memory_dirty = True
+    except Exception as e:  # noqa: BLE001 — 双保险（capture 自身已兜底）
+        AUDIT.output("Gateway", f"偏好沉淀任务异常（{type(e).__name__}: {e}）")
+
+
 async def _handle_team_event(ws: WebSocket, sess: Session, item) -> None:
     """团队事件 → 前端卡片 + Chatter 转述。卡片先于转述推送（转述挂了卡片也已送达）。
     卡片经 _route_ws 送会话当前活动连接（旧连接的移交事件也能送达刷新后的新页面）。"""
@@ -191,10 +415,13 @@ async def _handle_team_event(ws: WebSocket, sess: Session, item) -> None:
             "并询问是否需要修改（用户可提出修改意见或确认）。")
         await _chat(ws, sess, {"type": "chat", "role": "chatter", "text": reply})
     elif kind == "completed":
-        await _send(_route_ws(sess, ws), {"type": "final", "pdf_url": data.pdf_url,
+        await _send(_route_ws(sess, ws), {"type": "final",
+                                          "pdf_url": _api_pdf_url(safe_sid(sess.sid), sess) or data.pdf_url,
                                           "orders": data.order_summary,
                                           "total_price": data.total_price}, sess)
-        await _send(_route_ws(sess, ws), {"type": "usage", "usage": usage_summary()})  # 定稿即刷新消耗条（不等下次聊天）
+        await _send(_route_ws(sess, ws), {"type": "usage", "usage": usage_summary(sess.runner._usage_baseline)})  # 定稿即刷新消耗条
+        if sess.username:
+            asyncio.create_task(_capture_memory(sess))
         reply = await sess.relay_team_event(
             "规划团队已完成定稿（黑板 final 分区：PDF + 推荐订单清单）。请读取后向用户转述成果要点，"
             "提醒逐项确认订单并自行在官方渠道支付。")
@@ -243,7 +470,7 @@ async def _chat_worker(ws: WebSocket, sess: Session, q: asyncio.Queue) -> None:
             sess.current_chat_task = None
         await _chat(ws, sess, {"type": "chat", "role": "chatter", "text": reply or "（无回复）"})
         await _send(_route_ws(sess, ws), {"type": "profile", "profile": sess.profile_snapshot()}, sess)
-        await _send(_route_ws(sess, ws), {"type": "usage", "usage": usage_summary()}, sess)
+        await _send(_route_ws(sess, ws), {"type": "usage", "usage": usage_summary(sess.runner._usage_baseline)}, sess)
 
 
 async def _sender(ws: WebSocket, sess: Session, sub=None, last_seq: int = 0) -> None:
@@ -331,8 +558,8 @@ async def _replay_snapshot(ws: WebSocket, sid: str, sess: Session) -> bool:
     if sess.bb.profile.final:
         try:
             f = sess.bb.profile.final
-            await _send(ws, {"type": "final", "pdf_url": f.pdf_url, "orders": f.order_summary,
-                             "total_price": f.total_price})
+            await _send(ws, {"type": "final", "pdf_url": _api_pdf_url(sid, sess) or f.pdf_url,
+                             "orders": f.order_summary, "total_price": f.total_price})
         except Exception as e:  # noqa: BLE001 — 成品卡补播失败只降级
             AUDIT.output("Gateway", f"成品卡补播失败已跳过（{type(e).__name__}: {e}）")
     return True
@@ -340,10 +567,18 @@ async def _replay_snapshot(ws: WebSocket, sid: str, sess: Session) -> bool:
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
+    username = auth.verify_ws_ticket(ws.query_params.get("ticket") or "")
     await ws.accept()
-    sid, sess = _get_session(ws.query_params.get("sid"))
+    if not username:
+        try:
+            await ws.close(code=4401)  # 未认证：前端停自动重连并弹登录
+        except Exception:  # noqa: BLE001 — 对端可能已断开
+            pass
+        return
+    sid, sess = _get_session(username, ws.query_params.get("sid"))
     sess._live_ws = ws  # 会话当前活动连接：迟到的回复/卡片经 _route_ws 送达本连接
     sender = None
+    worker = None
     try:
         # 先订阅再补播（修复 #17 补播窗口）：补播期间产生的状态事件进入订阅队列，
         # 由 sender 按 seq > last_seq 去重后送达——不再存在"补播与订阅之间丢事件"。
@@ -358,7 +593,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 pass
             return
         last_seq = sess.bus.last_seq()
-        AUDIT.output("Gateway", f"WS 连接 sid={sid}｜补播状态 {history_n} 条 / 聊天 {chat_n} 条")
+        AUDIT.output("Gateway", f"WS 连接 user={username} sid={sid}｜补播状态 {history_n} 条 / 聊天 {chat_n} 条")
 
         # 协作式交接（2026-09-05）：不强杀旧 sender——旧 sender 处理完手头事件后
         # 自检"已非当前 sender"退出；在途团队事件经 _route_ws 送达本连接，不丢失。
@@ -428,10 +663,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
     finally:
         if sender is not None:
             sender.cancel()
-        worker.cancel()
+        if worker is not None:
+            worker.cancel()
         if getattr(sess, "_live_ws", None) is ws:
             sess._live_ws = None
-        AUDIT.output("Gateway", f"WS 断开 sid={sid}")
+        AUDIT.output("Gateway", f"WS 断开 user={username} sid={sid}")
 
 
 def main() -> None:

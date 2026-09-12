@@ -118,7 +118,8 @@ async def ensure_travel_dates(bb: Blackboard, bus: StatusBus) -> bool:
     return True
 
 
-def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> AssistantAgent:
+def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner,
+                  memory_text: str = "") -> AssistantAgent:
     async def save_travel_info(basic_info: str, detail_info: str) -> str:
         """把本轮抽取到的旅行画像字段写入共享黑板（未提及的字段不要传）。
         basic_info：JSON 对象，可含 origin、destination、days、travel_mode、travel_dates、date_text、
@@ -249,7 +250,7 @@ def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner) -> Assista
         model_client=get_model_client(),
         tools=[save_travel_info, get_travel_profile, start_planning, submit_draft_feedback,
                stop_planning],
-        system_message=prompts.CHATTER_PROMPT,
+        system_message=prompts.CHATTER_PROMPT + (memory_text or ""),
         reflect_on_tool_use=True,
     )
     return agent

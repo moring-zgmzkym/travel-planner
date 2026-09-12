@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 from contextlib import AsyncExitStack
@@ -146,21 +147,24 @@ def _extract_content(result: Any) -> Any:
 # 距离就是逐酒店全程握手（1+N 次），是收集阶段时延的最大单项。
 # 生命周期锚定 TeamRunner._run_phase（begin 于阶段开始 / end 于 finally），工具函数
 # （train_session 等）签名零改动：池未启用时自动回退原短会话路径。
+# 2026-09-12 多用户化：全局单例 → ContextVar——并发规划 run 各持各的池，互不覆盖/
+# 误关/泄漏（create_task 按 PEP 567 继承创建时的上下文，JobBoard 任务/护栏/路线保险
+# 均在阶段上下文内创建，天然可见；end 于 finally 同上下文 token reset）。
 # ---------------------------------------------------------------------------
 
-_ACTIVE_POOL: dict[str, "PersistentMcpSession"] | None = None
+_POOL_CTX: "contextvars.ContextVar[dict[str, PersistentMcpSession] | None]" = \
+    contextvars.ContextVar("tripmate_mcp_pool", default=None)
 
 
 def begin_mcp_pool() -> None:
     """阶段开始：启用持久会话池（随后各通道首次调用时建立会话）。"""
-    global _ACTIVE_POOL
-    _ACTIVE_POOL = {}
+    _POOL_CTX.set({})
 
 
 async def end_mcp_pool() -> None:
     """阶段结束：关闭全部持久会话（幂等；须在 finally 中调用）。"""
-    global _ACTIVE_POOL
-    pool, _ACTIVE_POOL = _ACTIVE_POOL, None
+    pool = _POOL_CTX.get()
+    _POOL_CTX.set(None)
     for s in (pool or {}).values():
         try:
             close_task = asyncio.ensure_future(s.close())
@@ -173,12 +177,14 @@ async def end_mcp_pool() -> None:
 
 
 def _pool_get(key: str) -> "PersistentMcpSession | None":
-    return _ACTIVE_POOL.get(key) if _ACTIVE_POOL is not None else None
+    pool = _POOL_CTX.get()
+    return pool.get(key) if pool is not None else None
 
 
 def _pool_put(key: str, session: "PersistentMcpSession") -> None:
-    if _ACTIVE_POOL is not None:
-        _ACTIVE_POOL[key] = session
+    pool = _POOL_CTX.get()
+    if pool is not None:
+        pool[key] = session
 
 
 def _match_tool(tools, keywords: tuple[str, ...], what: str):
@@ -212,8 +218,8 @@ class PersistentMcpSession:
       握手独立受 HANDSHAKE_TIMEOUT_S 保护（npx 冷启动不挤占调用预算）。
     - 调用超时/失败 → 重置会话引用（下次调用重新握手；外层 with_retry 负责重试）；
       被抛弃任务的清理继续在后台执行（mcp SDK 自带进程树终止）。
-    - 同会话调用按构造即串行（车票/酒店/天气各自独立会话），不加锁避免
-      "抛弃的挂死调用永久持锁"死锁。
+    - 同通道调用按构造即串行（车票/酒店/天气各自独立会话）；握手由 _open_lock 防并发双开
+      （只锁握手、call_tool 不持锁，超时取消即释放锁，无永久持锁面）。
     - actor 模式（2026-09-05 e2e 实测修复）：传输栈由专属 supervisor 任务持有——
       栈在该任务内进入与退出。此前栈在 JobBoard 任务内进入、在 end_mcp_pool 里退出，
       触发 anyio "cancel scope in a different task" 异常，干净关闭失败、stdio 子进程
@@ -234,6 +240,7 @@ class PersistentMcpSession:
         self._ready: asyncio.Event | None = None
         self._stop: asyncio.Event | None = None
         self._open_error: BaseException | None = None
+        self._open_lock = asyncio.Lock()   # 只锁握手不锁调用：并发首调等首次握手后复用，防双开子进程/连接
 
     async def _supervise_open(self) -> None:
         """专属持有任务：栈在本任务内进入；收到停止信号后在同任务内 aclose。"""
@@ -283,16 +290,22 @@ class PersistentMcpSession:
             logger.warning("持久 MCP 会话 %s 关闭异常（%s: %s）", self.name, type(e).__name__, e)
 
     async def _ensure_open(self) -> None:
+        # 握手加锁（call_tool 不持锁，跨通道/同通道既有并发语义不变）：并发首调等首次握手
+        # 完成后复用会话，防双开 npx 子进程/SSE 连接（其一无主泄漏）。调用方的握手超时取消
+        # 会穿过 async with 强制释放锁，不存在"抛弃的挂死调用永久持锁"（那是对锁整个调用而言）。
         if self._session is not None:
             return
-        self._open_error = None
-        self._ready = asyncio.Event()
-        self._stop = asyncio.Event()
-        self._supervisor = asyncio.create_task(self._supervise_open())
-        await self._ready.wait()
-        if self._open_error is not None:
-            self._supervisor = None
-            raise self._open_error
+        async with self._open_lock:
+            if self._session is not None:   # 等锁期间他人已完成握手：直接复用
+                return
+            self._open_error = None
+            self._ready = asyncio.Event()
+            self._stop = asyncio.Event()
+            self._supervisor = asyncio.create_task(self._supervise_open())
+            await self._ready.wait()
+            if self._open_error is not None:
+                self._supervisor = None
+                raise self._open_error
 
     def _reset(self) -> None:
         """失败/超时后重置：请求 supervisor 退出（栈在其自身任务内干净关闭），
@@ -385,7 +398,7 @@ def amap_session() -> McpSession | PersistentMcpSession:
         raise ServiceUnavailable("未配置 AMAP_API_KEY（高德官方 MCP 需要「Web 服务」Key）")
     url = f"{McpConfig.AMAP_MCP_URL}?key={McpConfig.AMAP_API_KEY}"
     transport = "sse" if "/sse" in McpConfig.AMAP_MCP_URL else "http"
-    if _ACTIVE_POOL is None:
+    if _POOL_CTX.get() is None:
         return McpSession(transport, url=url)
     pooled = _pool_get("amap")
     if pooled is not None:
@@ -399,7 +412,7 @@ def train_session() -> McpSession | PersistentMcpSession:
     """社区 12306-MCP（stdio：npx 拉起 Node 子进程）。"""
     if not McpConfig.MCP_12306_COMMAND:
         raise ServiceUnavailable("未配置 MCP_12306_COMMAND（社区 12306-MCP）")
-    if _ACTIVE_POOL is None:
+    if _POOL_CTX.get() is None:
         return McpSession("stdio", command=McpConfig.MCP_12306_COMMAND)
     pooled = _pool_get("12306")
     if pooled is not None:
@@ -415,7 +428,7 @@ def hotel_session() -> McpSession | PersistentMcpSession:
         raise ServiceUnavailable("未配置 MCP_HOTEL_URL（Dida 酒店 MCP）")
     headers = {"Authorization": f"Bearer {McpConfig.MCP_HOTEL_TOKEN}"} if McpConfig.MCP_HOTEL_TOKEN else None
     transport = "sse" if "/sse" in McpConfig.MCP_HOTEL_URL else "http"
-    if _ACTIVE_POOL is None:
+    if _POOL_CTX.get() is None:
         return McpSession(transport, url=McpConfig.MCP_HOTEL_URL, headers=headers)
     pooled = _pool_get("hotel")
     if pooled is not None:

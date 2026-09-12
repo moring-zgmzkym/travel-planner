@@ -4,7 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TripMate · 多 Agent 协同旅游规划</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#F97316">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body>
 <div class="layout">
@@ -17,6 +20,11 @@
       </div>
     </div>
 
+    <div class="user-bar" id="user-bar" style="display:none">
+      <span class="user-chip">👤 <span id="user-name"></span></span>
+      <button id="logout" title="退出登录">退出</button>
+    </div>
+
     <div class="panel" id="profile-panel">
       <div class="panel-title">🧳 旅行画像 <span class="ver" id="profile-ver">v0</span></div>
       <div id="profile-body" class="profile-body">等待信息录入…</div>
@@ -27,8 +35,15 @@
       <div id="orders-body"></div>
     </div>
 
+    <div class="panel" id="memory-panel">
+      <div class="panel-title">🧠 偏好记忆
+        <button class="mini-btn" id="memory-clear" title="清空全部偏好记忆">清空</button>
+      </div>
+      <div id="memory-body" class="memory-body">暂无沉淀，完成一次规划后自动提炼</div>
+    </div>
+
     <div class="panel">
-      <div class="panel-title">📊 Token 消耗</div>
+      <div class="panel-title">📊 Token 消耗（本次规划）</div>
       <div class="usage-bar"><div class="usage-fill" id="usage-fill"></div></div>
       <div class="usage-text" id="usage-text">0 / 500K</div>
     </div>
@@ -81,6 +96,22 @@
     <div class="timeline" id="timeline"></div>
   </aside>
 </div>
-<script src="/static/app.js"></script>
+
+<div class="login-overlay" id="login-overlay" style="display:none">
+  <div class="auth-card">
+    <div class="auth-logo">✈️</div>
+    <div class="auth-title">TripMate</div>
+    <div class="auth-sub">登录后开始规划你的旅程</div>
+    <div class="auth-tabs">
+      <button id="tab-login" class="on">登录</button>
+      <button id="tab-register">注册</button>
+    </div>
+    <input id="auth-username" placeholder="用户名（2-24 位中英文/数字/下划线）" autocomplete="username">
+    <input id="auth-password" type="password" placeholder="密码（至少 6 位）" autocomplete="current-password">
+    <button id="auth-submit">登录</button>
+    <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+<script src="/static/app.js?v=2"></script>
 </body>
 </html>
