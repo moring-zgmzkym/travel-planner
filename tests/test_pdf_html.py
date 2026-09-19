@@ -1,4 +1,4 @@
-"""HTML 路书渲染测试（唐风夜色主路径）：冒烟 / 敌意外部文本 / 极端画像边界。
+"""HTML 路书渲染测试（出片之旅主路径）：冒烟 / 敌意外部文本 / 极端画像边界。
 
 引擎（Playwright Chromium / 系统 Edge）不可用时整模块 skip——此时生产路径会自动
 降级 reportlab cartoon，由 test_pdf / test_templates 守护。"""
@@ -10,9 +10,34 @@ from test_pdf import _profile_bb  # 复用画像构造（tests 目录在 sys.pat
 RICH_KWARGS = {}
 
 
+def _photo_like_cover():
+    """封面夹具图：无文字的暖色渐变城市天际线（模拟真实城市宣传照片）。
+    不用 generate_placeholder——其烙印的巨型占位文字满版放大后压住封面标题，
+    与生产环境（真实照片）的表现完全不符。落盘到 imagegen 的图片目录（测试期被
+    conftest 隔离到临时目录）。"""
+    from PIL import Image, ImageDraw
+
+    from tripmate.tools.imagegen import IMAGE_DIR
+    path = IMAGE_DIR / "cover_fixture_skyline.jpg"
+    im = Image.new("RGB", (1600, 1200))
+    dr = ImageDraw.Draw(im)
+    for y in range(1200):  # 黄昏暖色天空渐变
+        t = y / 1200
+        dr.line([(0, y), (1600, y)],
+                fill=(int(52 + 96 * t), int(40 + 52 * t), int(64 + 26 * (1 - t))))
+    dr.rectangle([0, 920, 1600, 1200], fill=(28, 20, 24))  # 地平线剪影
+    for x, w, h in [(80, 130, 320), (280, 90, 430), (450, 150, 270), (690, 110, 390),
+                    (880, 170, 310), (1130, 100, 450), (1310, 160, 290)]:
+        dr.rectangle([x, 920 - h, x + w, 920], fill=(22, 15, 19))
+    im.save(path, quality=88)
+    return str(path)
+
+
 def _rich_profile():
-    """富画像：天气 + 景点/美食笔记 + 封面宣传图 + 三家酒店（含图），对齐真实定稿数据面。"""
-    from tripmate.models import FoodNote, SpotNote
+    """富画像：天气 + 景点/美食笔记 + 封面宣传图 + 三家酒店（含图）+ 路线 + 锦囊，
+    对齐真实定稿数据面（触发速览/闹钟/甘特/导航链接等全部新版式分支）。"""
+    from tripmate.models import (AlarmItem, DayTheme, FoodNote, GuideExtras, HotelCandidate,
+                                 RouteDay, RouteSegment, RouteStop, SpotNote)
     from tripmate.tools.imagegen import generate_placeholder
 
     bb = _profile_bb()
@@ -25,7 +50,7 @@ def _rich_profile():
     bb.profile.food_notes = [
         FoodNote(name="火锅", intro="牛油九宫格锅底，毛肚黄喉七上八下", image_path=generate_placeholder("火锅")),
         FoodNote(name="串串香", intro="竹签串菜红汤涮煮，按签计数", image_path=generate_placeholder("串串香"))]
-    bb.profile.cover_images = [generate_placeholder("成都城市封面")]
+    bb.profile.cover_images = [_photo_like_cover()]
     bb.profile.hotels[0].image_path = generate_placeholder("全季酒店成都春熙路店")
     from tripmate.models import HotelCandidate
     for i, (n, p) in enumerate([("亚朵酒店（天府广场店）", 488), ("如家精选（春熙路店）", 319)], 2):
@@ -34,6 +59,23 @@ def _rich_profile():
             link="https://hotels.ctrip.com/x", selected=False,
             reason="评分次优备选", source="模拟酒店库", reference_only=True,
             image_path=generate_placeholder(n)))
+    # 每日路线（含高德 nav_url → 验证导航链接注解）
+    stop = RouteStop(kind="spot", name="大熊猫繁育研究基地", address="成都外北熊猫大道",
+                     lon=104.144, lat=30.739,
+                     nav_url="https://uri.amap.com/navigation?to=104.144,30.739,大熊猫基地&mode=car&src=tripmate")
+    stop2 = RouteStop(kind="meal", meal="午餐", name="宽窄巷子小吃", address="青羊区宽窄巷子",
+                      lon=104.053, lat=30.663, reference_only=True, note="坐标为参考估算")
+    seg = RouteSegment(distance_m=8200, duration_min=25, mode="驾车", reference_only=True)
+    bb.profile.routes = [RouteDay(date="2026-10-01", stops=[stop, stop2], segments=[seg],
+                                  summary="动线顺，避免折返", total_km=8.2)]
+    # 路书锦囊（LLM 提炼产物的结构化形态）
+    bb.profile.guide_extras = GuideExtras(
+        overview_intro="把熊猫基地放在第一批入园时段，避开十点后的旅行团洪峰；午后转场市区核心，晚间留白。",
+        day_themes=[DayTheme(theme="国宝与老街", line="熊猫基地 → 宽窄巷子 → 小吃晚餐")],
+        alarms=[AlarmItem(when="9月17日 08:00", action="12306 抢 G1974 车票", channel="开售即抢；候补同步提交",
+                          difficulty="🔴 紧俏")],
+        hotel_verdict="全季距地铁与春熙路步行圈均衡，品质价格比最优。",
+        rhythm_note="第一天只排一个核心点，落地日不赶路。")
     return bb
 
 
@@ -66,14 +108,21 @@ def _render(bb) -> tuple[str, "pymupdf.Document"]:  # noqa: F821
 
 
 def test_html_pdf_smoke(html_engine):
+    import pymupdf
     path, doc = _render(_rich_profile())
     try:
         assert Path_bytes_head(path)
         assert doc.page_count >= 3, "至少封面+正文+封底"
         text = " ".join(doc[i].get_text() for i in range(doc.page_count))
-        assert "成都" in text and "行程总览" in text and "预算核算" in text
+        assert "成都" in text and "出发前 90 秒速览" in text and "预算总盘" in text
+        assert "抢约闹钟日历" in text and "住宿三选一定稿" in text, "新版式章节已渲染"
         assert f"{doc.page_count} / {doc.page_count}" in text, "页码已盖（含总页数）"
         assert doc.get_toc(), "书签目录已生成"
+        # 高德导航链接：路线站点 nav_url 必须以可点击链接注解形式存在（删二维码未丢导航）
+        links = [lk for i in range(doc.page_count) for lk in doc[i].get_links()
+                 if lk.get("kind") == pymupdf.LINK_URI]
+        assert any("uri.amap.com" in (lk.get("uri") or "") for lk in links), \
+            "路线站点的高德导航直达链接已生成"
     finally:
         doc.close()
         _cleanup(path)

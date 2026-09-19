@@ -8,70 +8,73 @@ html, body { margin: 0; padding: 0; }
 {{ css|safe }}
 .cover {
   width: 210mm; height: 296.5mm; overflow: hidden; position: relative;
-  background: linear-gradient(170deg, #1B2144, #262D59); color: #fff;
-  display: flex; flex-direction: column;
+  background: linear-gradient(170deg, #3A2620, #241412); color: #FFF8EE;
+  display: flex; flex-direction: column; justify-content: flex-end;
 }
-.moon {
-  position: absolute; top: 16mm; right: 19mm; width: 42mm; height: 42mm; border-radius: 50%;
-  background: radial-gradient(circle at 42% 40%, #EECF87, #EAC475 70%);
-  box-shadow: 0 0 11mm rgba(234, 196, 117, .38);
+.cover-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.cover-shade {
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(26, 15, 12, .34) 0%, rgba(26, 15, 12, .12) 34%,
+              rgba(26, 15, 12, .30) 58%, rgba(26, 15, 12, .84) 100%);
 }
-.cover-inner { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; }
+.cover-inner { position: relative; padding: 0 15mm 0; }
+.cover-top { position: absolute; top: 13mm; left: 15mm; right: 15mm; display: flex; align-items: center; gap: 5mm; }
 .badge {
-  margin-top: 22mm; border: 1px solid rgba(217, 164, 65, .8); border-radius: 999pt;
-  color: var(--gold-l); font-size: 9.8pt; letter-spacing: 2pt; padding: 3pt 16pt;
+  background: var(--red); color: #FFF8EE; border-radius: 3pt;
+  font-size: 10.5pt; font-weight: 700; letter-spacing: 2.5pt; padding: 2.6pt 11pt;
+  font-family: var(--serif); white-space: nowrap;
+}
+.en-line { font-size: 7.8pt; letter-spacing: 2.4pt; color: rgba(255, 248, 238, .85); text-transform: uppercase; }
+.motto-l {
+  font-family: var(--serif); color: var(--gold-l); font-size: 12.5pt; letter-spacing: 3pt;
+  margin-bottom: 4mm;
 }
 .title {
-  margin-top: 17mm; font-family: var(--serif); font-weight: 700; font-size: 42pt;
-  letter-spacing: 3pt; color: #fff; text-shadow: 2.2pt 2.2pt 0 rgba(0, 0, 0, .55);
-  max-width: 176mm; text-align: center; line-height: 1.2;
+  font-family: var(--serif); font-size: 37pt; font-weight: 700; letter-spacing: 2.5pt;
+  color: #FFFDF8; line-height: 1.25; margin: 0 0 4mm;
+  text-shadow: 2pt 2.4pt 0 rgba(20, 10, 8, .5);
 }
-.subtitle { margin-top: 7mm; font-family: var(--serif); font-size: 15.5pt; letter-spacing: 3pt; }
-.en-line {
-  margin-top: 5mm; font-size: 8.2pt; letter-spacing: 2.5pt; color: #8A94B0; text-transform: uppercase;
+.subtitle { font-size: 11pt; color: rgba(255, 248, 238, .92); letter-spacing: 1.5pt; margin-bottom: 7mm; }
+.stats { display: flex; gap: 4mm; margin-bottom: 9mm; }
+.stats .st {
+  flex: 1; background: rgba(30, 17, 14, .55); border: 1px solid rgba(232, 206, 156, .38);
+  border-radius: 7pt; padding: 5.5pt 4pt 4.5pt; text-align: center;
 }
-.chips { margin-top: 9mm; display: flex; gap: 4mm; }
-.chips .chip {
-  border: 1px solid rgba(255, 255, 255, .55); color: #fff; background: transparent;
-  font-size: 10pt; padding: 2pt 12pt;
+.stats .num {
+  font-family: var(--serif); font-size: 13.5pt; font-weight: 700; color: var(--gold-l);
+  white-space: nowrap;
 }
-.stats { margin-top: 11mm; display: flex; width: 172mm; }
-.stats .st { flex: 1; text-align: center; }
-.stats .num { font-family: var(--serif); font-size: 19pt; font-weight: 700; color: var(--gold-l); }
-.stats .lab { font-size: 8.6pt; color: #8A94B0; margin-top: 1pt; }
-.goldline { width: 100%; height: 1.4pt; background: linear-gradient(90deg, transparent, #D9A441, transparent); margin-top: 10mm; }
-.strip { width: 100%; height: 48mm; position: relative; }
-.strip img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.strip .plain { width: 100%; height: 100%; background: linear-gradient(170deg, #232953, #353F78); }
-.battlement {
-  width: 100%; height: 5mm;
-  background: repeating-linear-gradient(90deg, #E8E0CE 0 10.5mm, #57432B 10.5mm 21mm);
+.stats .lab { font-size: 7.8pt; color: rgba(255, 248, 238, .78); margin-top: 1pt; white-space: nowrap; }
+.countdown {
+  margin: 0 -15mm; background: rgba(142, 47, 37, .88); color: #FFF8EE;
+  font-size: 9.2pt; font-weight: 700; letter-spacing: .8pt;
+  text-align: center; padding: 3.2mm 10mm;
 }
-.cover-foot { width: 100%; text-align: center; font-size: 8.6pt; color: rgba(255, 255, 255, .82); padding: 2.6mm 0 3mm; }
+.cover-foot {
+  position: relative; text-align: center; font-size: 8.2pt; color: rgba(255, 248, 238, .8);
+  padding: 3mm 0 3.6mm; letter-spacing: 1pt;
+}
 </style>
 </head>
 <body>
 <div class="cover">
-  <div class="moon"></div>
+  {% if cover.cover_uri %}<img class="cover-bg" src="{{ cover.cover_uri }}" alt="">{% endif %}
+  <div class="cover-shade"></div>
+  <div class="cover-top">
+    <span class="badge">{{ cover.badge }}</span>
+    <span class="en-line">{{ cover.en_line }}</span>
+  </div>
   <div class="cover-inner">
-    <div class="badge">{{ cover.badge }}</div>
+    <div class="motto-l">{{ cover.motto }}</div>
     <h1 class="title">{{ cover.title }}</h1>
     <div class="subtitle">{{ cover.subtitle }}</div>
-    <div class="en-line">{{ cover.en_line }}</div>
-    <div class="chips">
-      {% for c in cover.chips %}<span class="chip">{{ c }}</span>{% endfor %}
-    </div>
     <div class="stats">
       {% for num, lab in cover.stats %}
       <div class="st"><div class="num">{{ num }}</div><div class="lab">{{ lab }}</div></div>
       {% endfor %}
     </div>
-    <div class="goldline"></div>
   </div>
-  <div class="strip">
-    {% if cover.strip_uri %}<img src="{{ cover.strip_uri }}" alt="">{% else %}<div class="plain"></div>{% endif %}
-  </div>
-  <div class="battlement"></div>
+  {% if cover.countdown %}<div class="countdown">{{ cover.countdown }}</div>{% endif %}
   <div class="cover-foot">{{ cover.foot }}</div>
 </div>
 </body>

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A4; margin: 0; }
+html, body { margin: 0; padding: 0; }
+{{ css|safe }}
+.cover {
+  width: 210mm; height: 296.5mm; overflow: hidden; position: relative;
+  background: #F5F0E4; color: var(--ink);
+  display: flex; flex-direction: column;
+}
+.frame { position: absolute; inset: 7mm; border: 1.2pt solid #A89B7E; }
+.frame-inner { position: absolute; inset: 9.5mm; border: 0.5pt solid #C9BC9F; }
+.vtitle {
+  position: absolute; left: 15mm; top: 50%; transform: translateY(-50%);
+  writing-mode: vertical-rl; letter-spacing: 5pt; font-family: var(--serif);
+  font-size: 12pt; color: #57503F;
+}
+.cover-inner { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; padding-top: 22mm; }
+.photo-card {
+  width: 148mm; background: #FFFFFF; border: 0.6pt solid #C9BC9F;
+  padding: 3.5mm; box-shadow: 0 1.5mm 4mm rgba(87, 80, 63, .18);
+}
+.photo-card img { width: 100%; height: 88mm; object-fit: cover; display: block; }
+.photo-empty {
+  width: 100%; height: 88mm; background: #EFE8D8;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3mm;
+}
+.photo-empty .big { font-family: var(--serif); font-size: 26pt; letter-spacing: 6pt; color: #57503F; }
+.photo-empty .small { font-size: 8.5pt; color: #8F8674; letter-spacing: 2pt; }
+.line-l {
+  margin-top: 9mm; font-size: 9.5pt; letter-spacing: 3pt; color: #8F8674;
+}
+.title {
+  margin-top: 5mm; font-family: var(--serif); font-size: 33pt; font-weight: 700;
+  letter-spacing: 3pt; color: #37322A; line-height: 1.25;
+}
+.title-row { display: flex; align-items: flex-end; gap: 5mm; }
+.seal {
+  background: #9C3B2C; color: #FCF9F1; font-family: var(--serif); font-weight: 700;
+  font-size: 13pt; letter-spacing: 2pt; padding: 2.5mm 3mm; border-radius: 1.5mm;
+  margin-bottom: 4mm;
+}
+.subtitle { margin-top: 4.5mm; font-size: 10.5pt; letter-spacing: 1.5pt; color: #57503F; }
+.stats {
+  margin-top: 9mm; width: 158mm; display: flex; border-top: 0.7pt solid #C9BC9F;
+  border-bottom: 0.7pt solid #C9BC9F; padding: 4mm 0;
+}
+.stats .st { flex: 1; text-align: center; }
+.stats .num { font-family: var(--serif); font-size: 13pt; font-weight: 700; color: #37322A; }
+.stats .lab { font-size: 7.8pt; color: #8F8674; margin-top: 1pt; }
+.countdown { margin-top: 6mm; font-size: 8.8pt; color: #9C3B2C; letter-spacing: .8pt; }
+.cover-foot {
+  position: relative; text-align: center; font-size: 8.2pt; color: #8F8674;
+  padding: 3mm 0 13.5mm; letter-spacing: 1pt; /* 底部留足间距，页脚落于内框线（9.5mm）上方 */
+}
+</style>
+</head>
+<body>
+<div class="cover">
+  <div class="frame"></div>
+  <div class="frame-inner"></div>
+  <div class="vtitle">{{ basic.destination }} · 旅行路书</div>
+  <div class="cover-inner">
+    <div class="photo-card">
+      {% if cover.cover_uri %}
+      <img src="{{ cover.cover_uri }}" alt="">
+      {% else %}
+      <div class="photo-empty">
+        <div class="big">{{ basic.destination }}</div>
+        <div class="small">实景照片采集后自动装入</div>
+      </div>
+      {% endif %}
+    </div>
+    <div class="line-l">{{ basic.party }} 人 · {{ basic.mode }} 往返 · {{ basic.styles }}</div>
+    <div class="title-row">
+      <h1 class="title">{{ cover.title }}</h1>
+      <div class="seal">路书</div>
+    </div>
+    <div class="subtitle">{{ cover.subtitle }}</div>
+    <div class="stats">
+      {% for num, lab in cover.stats %}
+      <div class="st"><div class="num">{{ num }}</div><div class="lab">{{ lab }}</div></div>
+      {% endfor %}
+    </div>
+    {% if cover.countdown %}<div class="countdown">{{ cover.countdown }}</div>{% endif %}
+  </div>
+  <div class="cover-foot">{{ cover.foot }}</div>
+</div>
+</body>
+</html>

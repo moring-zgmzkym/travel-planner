@@ -1,27 +1,27 @@
-/* 出片之旅路书主题 —— 对齐 learning/《北京3天出片之旅》《西安出片之旅》样张：
-   奶油米白正文 + 中国红金杂志排版。@page 规则由各段模板（封面/正文/封底）内联注入，
-   本文件只含类样式。 */
+/* 典雅墨卷主题 —— 对齐 learning/《西安出片之旅（典雅版）》样张：
+   宣纸米底 + 墨色宋体 + 茶金面板 + 朱砂印章点缀。以 lushu.css 为基底复制，
+   类集合与变量名保持契约一致，仅改变量值与本文件末尾的主题覆盖块。 */
 
 :root {
-  --red: #B03A2E;       /* 中国红主色（章节号/表头/强调） */
-  --red2: #C9503F;      /* 亮一号红（悬停/次强调） */
-  --red-deep: #8E2F25;  /* 深红（渐变端点） */
-  --gold: #C9A063;      /* 金棕主色 */
-  --gold2: #A87F3F;     /* 深金文字 */
-  --gold-l: #E8CE9C;    /* 深底上的浅金 */
-  --gold-bg: #F5EBD8;   /* 米金块底 */
-  --navy: #2E3766;      /* 藏青辅助（下午块/次表头） */
-  --paper: #FAF6EF;     /* 米白页底 */
-  --cream: #FFFDF8;     /* 卡片暖白 */
-  --cream2: #FBF3E4;    /* 强调行底 */
-  --line: #E7DECE;      /* 细边框 */
-  --red-line: #E4B7AE;
-  --red-bg: #FAF0EC;
-  --green: #5F7E62;     /* 勾选绿 */
-  --green-bg: #EAF0E7;
-  --ink: #33302E;       /* 正文墨色 */
-  --muted: #8C8578;     /* 弱化灰棕 */
-  --link: #8E2F25;
+  --red: #9C3B2C;       /* 朱砂主色（印章/强调） */
+  --red2: #B04E3D;
+  --red-deep: #7E2E23;
+  --gold: #A89B7E;      /* 茶金 */
+  --gold2: #7A6A4C;
+  --gold-l: #D8C9AC;
+  --gold-bg: #F1E9D6;
+  --navy: #4F6478;      /* 青灰蓝点缀 */
+  --paper: #FAF6EB;     /* 宣纸米白 */
+  --cream: #FCF9F1;
+  --cream2: #F5F0E4;
+  --line: #E3DAC5;
+  --red-line: #D8B7AA;
+  --red-bg: #F7F0E9;
+  --green: #6B7E62;
+  --green-bg: #ECF0E6;
+  --ink: #37322A;       /* 墨色正文 */
+  --muted: #8F8674;
+  --link: #7E2E23;
   /* 字体栈用系统静态字体（2026-09-12）：Noto SC 可变字体（VF）会被 Chromium 导出为
      Type3 嵌字，部分阅读器（手机微信/WPS 等）对中文 Type3 渲染异常（方块/字形替换）；
      华文中宋/微软雅黑为静态字体，嵌字为通用 CIDFontType2，全阅读器兼容 */
@@ -39,12 +39,12 @@ p { margin: 0; }
 a { color: var(--link); }
 b, strong { color: var(--red-deep); }
 
-/* ---- 章节头（红底章号块 + 宋体标题 + 英文小标签 + 红金渐变线）---- */
+/* ---- 章节头 ---- */
 .sec { margin-top: 15pt; }
 .sec-head { display: flex; align-items: center; gap: 9pt; break-after: avoid; break-inside: avoid; }
 .sec-num {
-  min-width: 25pt; height: 25pt; padding: 0 4pt; border-radius: 6pt; background: var(--red);
-  color: #FFF8EE; font-family: var(--serif); font-size: 13.5pt;
+  min-width: 25pt; height: 25pt; padding: 0 4pt; border-radius: 6pt; background: #57503F;
+  color: #FCF9F1; font-family: var(--serif); font-size: 13.5pt;
   display: flex; align-items: center; justify-content: center; flex: none;
 }
 .sec-head h2 { font-family: var(--serif); font-size: 19pt; letter-spacing: 1pt; font-weight: 700; color: var(--ink); }
@@ -55,12 +55,12 @@ b, strong { color: var(--red-deep); }
 }
 .sec-sub { color: var(--muted); font-size: 8.6pt; margin: 2pt 0 0 34pt; break-after: avoid; }
 .sec-rule {
-  height: 2.2pt; background: linear-gradient(90deg, var(--red) 0 22%, var(--gold) 60%, #EBDDC0);
+  height: 2.2pt; background: linear-gradient(90deg, #57503F 0 22%, #A89B7E 60%, #E3DAC5);
   margin: 6pt 0 10pt; border-radius: 1pt;
-  break-after: avoid;   /* 章节头三件套（题/副题/线）不与正文拆页，防标题孤悬页底 */
+  break-after: avoid;
 }
 
-/* ---- 小节头（红竖条）---- */
+/* ---- 小节头 ---- */
 .subhead {
   display: flex; align-items: center; gap: 6pt; margin: 10pt 0 6pt;
   break-after: avoid; break-inside: avoid;
@@ -72,7 +72,7 @@ b, strong { color: var(--red-deep); }
 /* ---- 卡片 ---- */
 .card {
   background: var(--cream); border: 1px solid var(--line); border-radius: 10pt;
-  padding: 9pt 11pt; box-shadow: 0 1px 4px rgba(64, 48, 34, .06); break-inside: avoid;
+  padding: 9pt 11pt; box-shadow: 0 1px 4px rgba(64, 56, 42, .06); break-inside: avoid;
 }
 .card h4 { font-size: 11pt; margin-bottom: 3pt; color: var(--red-deep); }
 .grid2 { display: flex; gap: 8pt; }
@@ -82,24 +82,24 @@ b, strong { color: var(--red-deep); }
 .grid4 { display: flex; gap: 8pt; }
 .grid4 > * { flex: 1; min-width: 0; }
 
-/* ---- 通用表格（红头 + 圆角外框）---- */
+/* ---- 通用表格（墨棕表头）---- */
 table.tbl {
   width: 100%; border-collapse: separate; border-spacing: 0; font-size: 9.3pt;
   border: 1px solid var(--line); border-radius: 10pt; overflow: hidden;
 }
 .tbl th {
-  background: var(--red); color: #FFF8EE; font-weight: 700; text-align: left;
+  background: #57503F; color: #FCF9F1; font-weight: 700; text-align: left;
   padding: 4.5pt 7pt; font-size: 9.2pt; white-space: nowrap;
 }
 .tbl td { padding: 4.5pt 7pt; border-top: 1px solid var(--line); vertical-align: top; }
-.tbl tr:nth-child(even) td { background: #FDFAF3; }
+.tbl tr:nth-child(even) td { background: #FDFBF4; }
 .tbl tr.sel td { background: var(--cream2); }
 .tbl .num { text-align: right; }
 .tbl tr.sum td { background: var(--cream2); font-weight: 700; color: var(--red-deep); }
 .tbl td b { color: var(--red-deep); }
-.tbl td.kind { white-space: nowrap; }   /* 类型列窄而不折行（防"酒/店"逐字竖排） */
-.tbl a { white-space: nowrap; }          /* 链接文字与箭头不拆行 */
-.tbl td.wrap-bal { text-wrap: balance; } /* 长文案单元格两行均衡断行，防末字孤行 */
+.tbl td.kind { white-space: nowrap; }
+.tbl a { white-space: nowrap; }
+.tbl td.wrap-bal { text-wrap: balance; }
 
 /* ---- 总览键值表 ---- */
 .kv td { border-top: 1px solid var(--line); padding: 5.5pt 8pt; vertical-align: top; }
@@ -114,48 +114,48 @@ table.tbl {
   display: inline-block; border-radius: 999pt; padding: 0.5pt 8pt;
   font-size: 8.2pt; line-height: 1.6; margin: 1pt 2pt 1pt 0; white-space: nowrap;
 }
-.c-red { background: var(--red); color: #FFF8EE; }
+.c-red { background: var(--red); color: #FCF9F1; }
 .c-deep { background: var(--red-deep); color: var(--gold-l); }
 .c-gold { background: var(--gold-bg); color: var(--gold2); }
-.c-transport { background: #EDF0F6; color: var(--navy); }
-.c-time { background: #F1EDE2; color: var(--muted); }
-.c-cost { background: #F7ECD4; color: var(--gold2); }
+.c-transport { background: #EBEFF2; color: var(--navy); }
+.c-time { background: #F0EDE2; color: var(--muted); }
+.c-cost { background: var(--gold-bg); color: var(--gold2); }
 .c-free { background: var(--green-bg); color: var(--green); }
-.c-warn { background: #fff; border: 1px solid var(--red-line); color: var(--red); }
+.c-warn { background: var(--cream); border: 1px solid var(--red-line); color: var(--red); }
 
-/* ---- 速览数据 chips（出片之旅 p2 顶部四联卡）---- */
+/* ---- 速览数据 chips ---- */
 .stat-chips { display: flex; gap: 8pt; margin-bottom: 10pt; }
 .stat-chips .st {
   flex: 1; text-align: center; background: var(--cream); border: 1px solid var(--line);
-  border-top: 2.5pt solid var(--red); border-radius: 8pt; padding: 7pt 4pt 6pt; break-inside: avoid;
+  border-top: 2.5pt solid #57503F; border-radius: 8pt; padding: 7pt 4pt 6pt; break-inside: avoid;
 }
-.stat-chips .num { font-family: var(--serif); font-size: 14.5pt; font-weight: 700; color: var(--red); line-height: 1.3; }
+.stat-chips .num { font-family: var(--serif); font-size: 14.5pt; font-weight: 700; color: #57503F; line-height: 1.3; }
 .stat-chips .lab { font-size: 8pt; color: var(--muted); margin-top: 1pt; }
 
-/* ---- 主题词行（"红墙金瓦 × 胡同烟火"式）---- */
+/* ---- 主题词行 ---- */
 .motto {
   font-family: var(--serif); color: var(--gold2); font-size: 10.5pt; letter-spacing: 2pt;
   margin: 6pt 0 2pt 34pt;
 }
 
-/* ---- Day 横幅（深色照片横幅的纯色替代：深红棕渐变 + 金徽章）---- */
+/* ---- Day 横幅（墨棕渐变）---- */
 .day-banner {
-  background: linear-gradient(135deg, #35221C, #6B3A2C); border-radius: 14pt;
-  color: #FFF8EE; padding: 10pt 14pt; display: flex; gap: 12pt; align-items: center;
+  background: linear-gradient(135deg, #3A332A, #5C5342); border-radius: 14pt;
+  color: #FCF9F1; padding: 10pt 14pt; display: flex; gap: 12pt; align-items: center;
   break-inside: avoid; break-after: avoid;
 }
 .dbadge {
   width: 36pt; height: 36pt; border: 1px solid var(--gold-l); border-radius: 8pt;
-  background: rgba(176, 58, 46, .55);
+  background: rgba(156, 59, 44, .45);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   flex: none; font-family: var(--sans);
 }
-.dbadge b { font-size: 13.5pt; color: #FFF8EE; line-height: 1.15; }
+.dbadge b { font-size: 13.5pt; color: #FCF9F1; line-height: 1.15; }
 .dbadge i { font-style: normal; font-size: 4.8pt; color: var(--gold-l); letter-spacing: 1.2pt; }
 .day-banner .t { font-family: var(--serif); font-size: 14pt; line-height: 1.35; }
-.day-banner .s { font-size: 8.6pt; color: rgba(255, 248, 238, .78); margin-top: 1pt; }
+.day-banner .s { font-size: 8.6pt; color: rgba(252, 249, 241, .78); margin-top: 1pt; }
 .day-banner .chips { margin-top: 4pt; }
-.day-banner .chips .chip { background: rgba(255, 248, 238, .14); color: #FFF8EE; border: 1px solid rgba(232, 206, 156, .45); }
+.day-banner .chips .chip { background: rgba(252, 249, 241, .14); color: #FCF9F1; border: 1px solid rgba(216, 201, 172, .45); }
 .day-wrap { break-inside: auto; margin-top: 12pt; }
 
 /* ---- KPI 小卡 ---- */
@@ -167,7 +167,7 @@ table.tbl {
 .kpi .l { font-size: 7.8pt; color: var(--muted); }
 
 /* ---- 垂直时间轴 ---- */
-.tl { position: relative; margin: 8pt 0 2pt 6pt; padding-left: 18pt; border-left: 2px solid #E5D5BC; break-inside: avoid; }
+.tl { position: relative; margin: 8pt 0 2pt 6pt; padding-left: 18pt; border-left: 2px solid #E0D6BE; break-inside: avoid; }
 .tl-item { position: relative; margin-bottom: 9pt; break-inside: avoid; }
 .tl-item::before {
   content: ""; position: absolute; left: -24.5pt; top: 12pt; width: 7pt; height: 7pt;
@@ -182,7 +182,7 @@ table.tbl {
 /* ---- 路线块 ---- */
 .route-card { background: var(--cream); border: 1px solid var(--line); border-radius: 10pt; overflow: hidden; break-inside: auto; }
 .route-head {
-  background: var(--red-deep); color: #FFF8EE; padding: 5pt 10pt; font-weight: 700;
+  background: var(--red-deep); color: #FCF9F1; padding: 5pt 10pt; font-weight: 700;
   font-size: 9.6pt; font-family: var(--sans); letter-spacing: .5pt;
   break-after: avoid;
 }
@@ -198,15 +198,15 @@ table.tbl {
 .route-mid .nt { font-size: 8pt; color: var(--red); }
 .route-right { flex: none; text-align: right; }
 .nav-btn {
-  display: inline-block; background: var(--red); color: #FFF8EE; border-radius: 999pt;
+  display: inline-block; background: var(--red); color: #FCF9F1; border-radius: 999pt;
   font-size: 8.2pt; font-weight: 700; padding: 1.5pt 9pt; text-decoration: none; white-space: nowrap;
 }
 .nav-ref { font-size: 7.6pt; color: var(--muted); }
 .route-conn {
-  background: #FDFAF3; color: var(--muted); font-size: 8.4pt; padding: 2.5pt 10pt 2.5pt 36pt;
+  background: #FDFBF4; color: var(--muted); font-size: 8.4pt; padding: 2.5pt 10pt 2.5pt 36pt;
   border-top: 1px solid var(--line);
 }
-.route-tail { background: #FDFAF3; color: var(--red); font-size: 8.4pt; padding: 3pt 10pt; border-top: 1px solid var(--line); }
+.route-tail { background: #FDFBF4; color: var(--red); font-size: 8.4pt; padding: 3pt 10pt; border-top: 1px solid var(--line); }
 
 /* ---- 图片 ---- */
 .photo { border-radius: 8pt; width: 100%; object-fit: cover; display: block; }
@@ -220,7 +220,7 @@ table.tbl {
 .dayphotos .photo { height: 30mm; }
 .dayphotos .cap { font-size: 7.8pt; color: var(--muted); margin-top: 2pt; }
 .noimg {
-  height: 30mm; border: 1px dashed var(--line); border-radius: 8pt; background: #FDFAF3;
+  height: 30mm; border: 1px dashed var(--line); border-radius: 8pt; background: #FDFBF4;
   display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 8.5pt;
 }
 
@@ -228,7 +228,7 @@ table.tbl {
 .hotels { display: flex; gap: 8pt; }
 .hotels .card { padding: 0; overflow: hidden; position: relative; }
 .hotels .card.rec { border: 1.8pt solid var(--red); }
-.hotels .hl-top { padding: 3.5pt 0; text-align: center; color: #FFF8EE; font-size: 9pt; font-weight: 700; letter-spacing: 1pt; }
+.hotels .hl-top { padding: 3.5pt 0; text-align: center; color: #FCF9F1; font-size: 9pt; font-weight: 700; letter-spacing: 1pt; }
 .hotels .card.rec .hl-top { background: var(--red); }
 .hotels .hl-body { padding: 7pt 9pt 8pt; }
 .hotels .nm { font-family: var(--sans); font-weight: 700; color: var(--ink); font-size: 10.8pt; }
@@ -236,7 +236,7 @@ table.tbl {
 .hotels img.wide { width: 100%; height: 26mm; object-fit: cover; display: block; }
 .hotels .imgwrap { height: 26mm; }
 .verdict {
-  background: var(--gold-bg); border: 1px solid #E8D5AC; border-radius: 10pt;
+  background: var(--gold-bg); border: 1px solid #DCD2BB; border-radius: 10pt;
   padding: 8pt 11pt; font-size: 8.8pt; margin-top: 8pt; break-inside: avoid;
 }
 .verdict .lead { color: var(--red-deep); font-weight: 700; }
@@ -253,11 +253,11 @@ table.tbl {
 .foodgrid .fg {
   width: calc(25% - 6pt); text-align: center; border: 1px solid var(--line);
   border-top: 2pt solid var(--red); border-radius: 6pt; padding: 6pt 3pt;
-  font-weight: 700; color: var(--ink); font-size: 9.2pt; background: #FDFAF3; break-inside: avoid;
+  font-weight: 700; color: var(--ink); font-size: 9.2pt; background: #FDFBF4; break-inside: avoid;
 }
 
 /* ---- 预算 ---- */
-.occupancy { height: 4.5pt; border-radius: 3pt; background: #EFE7D6; overflow: hidden; margin: 6pt 0 3pt; }
+.occupancy { height: 4.5pt; border-radius: 3pt; background: #EDE6D4; overflow: hidden; margin: 6pt 0 3pt; }
 .occupancy i { display: block; height: 100%; background: var(--occ, var(--red)); }
 .budget-flex { display: flex; gap: 12pt; align-items: flex-start; }
 .budget-flex .donut { flex: none; text-align: center; }
@@ -282,7 +282,7 @@ table.tbl {
   align-items: center; justify-content: center; padding: 2pt 4pt; text-align: center;
 }
 .gantt .g-block {
-  flex: 1; min-width: 0; border-radius: 6pt; color: #FFF8EE; padding: 4pt 8pt;
+  flex: 1; min-width: 0; border-radius: 6pt; color: #FCF9F1; padding: 4pt 8pt;
   font-size: 8.4pt; line-height: 1.55; overflow: hidden;
 }
 .gantt .g-block b { display: block; color: inherit; font-size: 8.2pt; letter-spacing: 1pt; opacity: .85; }
@@ -295,7 +295,7 @@ table.tbl {
 /* ---- 原则卡 / 装备 / 通用 ---- */
 .principle { text-align: left; padding: 8pt 9pt; border-top: 2pt solid var(--red); }
 .principle .zi {
-  width: 17pt; height: 17pt; border-radius: 4pt; background: var(--red); color: #FFF8EE;
+  width: 17pt; height: 17pt; border-radius: 4pt; background: #57503F; color: #FCF9F1;
   font-family: var(--serif); display: inline-flex; align-items: center;
   justify-content: center; font-size: 10.5pt; margin-bottom: 3pt;
 }
@@ -323,7 +323,7 @@ li { margin: 1.5pt 0; }
 .steps .card { margin-bottom: 7pt; }
 .stepnum {
   display: inline-flex; width: 13pt; height: 13pt; border-radius: 50%; background: var(--red);
-  color: #FFF8EE; font-size: 8.5pt; align-items: center; justify-content: center;
+  color: #FCF9F1; font-size: 8.5pt; align-items: center; justify-content: center;
   margin-right: 6pt; vertical-align: -2pt;
 }
 

@@ -27,8 +27,9 @@ from .config import BudgetConfig, JobConfig, ServerConfig
 from .llm import TokenBudgetExceeded, check_budget, get_model_client, reset_usage, snapshot_usage
 from .mocks.data import kb_for_city
 from .models import (Draft, DraftDay, DraftFeedback, FinalDelivery, GuideDigestItem,
-                     HotelCandidate, ImageItem, PlanInput, TicketCandidate, TravelProfile)
-from .digest import build_digest_notes
+                     GuideExtras, HotelCandidate, ImageItem, PlanInput, TicketCandidate,
+                     TravelProfile)
+from .digest import build_digest_notes, build_guide_extras
 from .pdf_gen import build_pdf
 from .planning import PACE_SPOTS, analyze_impact, compute_budget, validate_draft
 from .status import AUDIT, StatusBus
@@ -734,6 +735,22 @@ async def _deliver_final(ctx: TeamContext) -> str:
             await ctx.bb.write("routes", merge_review(r, {}), "booking", "定稿保险：路线分区缺失补算")
         except Exception as exc:  # noqa: BLE001 — 保险失败仅记审计，PDF 省略路线版块
             AUDIT.observation("TeamRunner", f"路线定稿保险失败（跳过）：{type(exc).__name__}: {exc}")
+    # 路书锦囊：定稿前一次 LLM 提炼（速览引言/每日主题/抢约闹钟/住宿定稿理由/节奏说明）。
+    # deliver_final 既是 Agent 工具又是护栏路径，钩子放本函数内两条路都覆盖；幂等：
+    # guide_extras 已存在（含失败时写入的空对象）即跳过。任何失败静默，PDF 走通用回退。
+    if prof.guide_extras is None and prof.draft:
+        try:
+            extras = await build_guide_extras(prof)
+            await ctx.bb.write("guide_extras", extras, "planner",
+                               "定稿提炼：路书锦囊（速览/主题/闹钟/定稿理由）")
+            AUDIT.observation("TeamRunner",
+                              f"路书锦囊提炼：主题 {len(extras.day_themes)} / 闹钟 {len(extras.alarms)}")
+        except Exception as exc:  # noqa: BLE001 — 失败写空对象防重试风暴，PDF 走回退
+            AUDIT.observation("TeamRunner", f"路书锦囊提炼失败（写空跳过）：{type(exc).__name__}: {exc}")
+            try:
+                await ctx.bb.write("guide_extras", GuideExtras(), "planner", "定稿提炼失败：写入空锦囊防重试")
+            except Exception:  # noqa: BLE001 — 写空也失败则下次交付可能重试一次，可接受
+                pass
     # to_thread：渲染是同步重活（Chromium 启动 + 排版），内联执行会冻结整个事件循环
     # （所有会话的推送全停摆）；深拷贝快照隔离渲染期间的用户并发写黑板（阻塞版的
     # 隐含串行安全性随线程化消失）。on_fallback 在工作线程被调，转事件循环推时间线。
@@ -831,7 +848,7 @@ class TeamRunner:
         # 清空必须在 _base_version 采集之前（增量重跑/终止判定以清空后的黑板为基准）。
         dest = prof.basic_info.destination or ""
         clear: dict[str, Any] = {"draft": None, "draft_feedback": None, "final": None,
-                                 "plan_input": None, "routes": []}
+                                 "plan_input": None, "routes": [], "guide_extras": None}
         if dest != self._last_destination:
             # spot_notes/food_notes/cover_images 一并清：旧城市的笔记/封面混入新 PDF 是正确性 bug
             # （2026-09-04 核查：此前只清数据分区，笔记与封面残留且幂等标志阻止重取）
@@ -1406,11 +1423,12 @@ def _changed_fields(changes) -> list[str]:
     注意：FIELD_IMPACT 的键不带分区前缀（apply_* 写入的 field 本就是 "hotel.xxx" /
     "party_size" 等裸键名），此前拼接 "detail_info." 前缀导致酒店/人数类变更永远
     查不中映射表、被静默降级为"仅行程重排"（旧偏好不触发重查）。defaults_applied
-    是系统默认值记录而非用户意图变更，一并过滤。"""
+    是系统默认值记录而非用户意图变更，一并过滤；template 是排版选择而非规划意图，
+    不应出现在变更影响分析里（同样过滤）。"""
     fields = []
     for e in changes:
         f = e.field
-        if f == "defaults_applied" or f in fields:
+        if f == "defaults_applied" or f == "template" or f in fields:
             continue
         fields.append(f)
     return fields

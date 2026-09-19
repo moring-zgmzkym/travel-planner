@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A4; margin: 0; }
+html, body { margin: 0; padding: 0; }
+{{ css|safe }}
+.cover {
+  width: 210mm; height: 296.5mm; overflow: hidden; position: relative;
+  background: #FFFFFF; color: var(--ink);
+  display: flex; flex-direction: column;
+}
+.band { height: 6mm; background: #1F3A5F; }
+.band-line { height: 0.8pt; background: #1F3A5F; margin-top: 1.2mm; }
+.cover-inner { flex: 1; display: flex; flex-direction: column; align-items: center; padding-top: 14mm; }
+.doc-line {
+  font-size: 9pt; letter-spacing: 2.5pt; color: #8A93A0; margin-bottom: 8mm;
+}
+.photo-card {
+  width: 158mm; background: #FFFFFF; border: 1pt solid #B4C0CE;
+  padding: 2.5mm; box-shadow: 0 1mm 3mm rgba(31, 58, 95, .14);
+}
+.photo-card img { width: 100%; height: 84mm; object-fit: cover; display: block; }
+.photo-empty {
+  width: 100%; height: 84mm; background: #EEF2F7;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3mm;
+}
+.photo-empty .big { font-family: var(--sans); font-size: 24pt; font-weight: 700; letter-spacing: 5pt; color: #1F3A5F; }
+.photo-empty .small { font-size: 8.5pt; color: #8A93A0; letter-spacing: 2pt; }
+.line-l { margin-top: 8mm; font-size: 9.5pt; letter-spacing: 3pt; color: #8A93A0; }
+.title {
+  margin-top: 4mm; font-family: var(--sans); font-size: 33pt; font-weight: 700;
+  letter-spacing: 2.5pt; color: #1F3A5F; line-height: 1.25;
+}
+.subtitle { margin-top: 4mm; font-size: 11pt; letter-spacing: 1.5pt; color: #262B33; }
+.subtitle-rule { width: 32mm; height: 1.6pt; background: #1F3A5F; margin-top: 4mm; }
+.dates-line { margin-top: 5mm; font-size: 9.5pt; letter-spacing: 1.2pt; color: #56687A; }
+.stats {
+  margin-top: 9mm; width: 168mm; display: flex; border: 1pt solid #B4C0CE; border-radius: 2pt;
+  overflow: hidden;
+}
+.stats .st { flex: 1; text-align: center; padding: 4.5mm 2mm; border-right: 1pt solid #B4C0CE; background: #FFFFFF; }
+.stats .st:last-child { border-right: none; }
+.stats .num { font-family: var(--sans); font-size: 12.5pt; font-weight: 700; color: #1F3A5F; white-space: nowrap; }
+.stats .lab { font-size: 7.8pt; color: #8A93A0; margin-top: 1pt; white-space: nowrap; }
+.countdown { margin-top: 7mm; font-size: 8.8pt; color: #1F3A5F; font-weight: 700; letter-spacing: .8pt; }
+.cover-foot {
+  text-align: center; font-size: 8.2pt; color: #8A93A0; padding: 0 0 6mm; letter-spacing: 1pt;
+}
+</style>
+</head>
+<body>
+<div class="cover">
+  <div class="band"></div>
+  <div class="band-line"></div>
+  <div class="cover-inner">
+    <div class="doc-line">出 行 方 案 · 编 号 {{ cover.doc_no }} · 行 政 版</div>
+    <div class="photo-card">
+      {% if cover.cover_uri %}
+      <img src="{{ cover.cover_uri }}" alt="">
+      {% else %}
+      <div class="photo-empty">
+        <div class="big">{{ basic.destination }}</div>
+        <div class="small">实景照片采集后自动装入</div>
+      </div>
+      {% endif %}
+    </div>
+    <div class="line-l">{{ basic.party }} 人 · {{ basic.mode }} 往返 · {{ basic.styles }}</div>
+    <h1 class="title">{{ cover.title }}</h1>
+    <div class="subtitle">{{ basic.destination }} {{ cover.days_nights }} · 定制旅行路书</div>
+    <div class="subtitle-rule"></div>
+    <div class="dates-line">{{ basic.dates_txt }} ｜ {{ basic.origin }} ⇄ {{ basic.destination }}</div>
+    <div class="stats">
+      {% for num, lab in cover.stats %}
+      <div class="st"><div class="num">{{ num }}</div><div class="lab">{{ lab }}</div></div>
+      {% endfor %}
+    </div>
+    {% if cover.countdown %}<div class="countdown">{{ cover.countdown }}</div>{% endif %}
+  </div>
+  <div class="cover-foot">{{ cover.foot }}</div>
+</div>
+</body>
+</html>

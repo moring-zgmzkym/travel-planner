@@ -9,17 +9,27 @@ html, body { margin: 0; padding: 0; }
 .back {
   width: 210mm; height: 296.5mm; overflow: hidden; position: relative;
   background:
-    radial-gradient(circle at 50% 12%, rgba(234, 196, 117, .16), transparent 46%),
-    linear-gradient(170deg, #1B2144, #262D59);
-  color: #fff; display: flex; align-items: center; justify-content: center;
+    radial-gradient(circle at 50% 10%, rgba(201, 160, 99, .16), transparent 44%),
+    linear-gradient(170deg, #FAF6EF, #F3EBDC);
+  color: var(--ink); display: flex; align-items: center; justify-content: center;
 }
-.back-inner { text-align: center; max-width: 160mm; }
-.back h1 { font-family: var(--serif); font-size: 30pt; font-weight: 700; letter-spacing: 4pt; }
-.back .sub { font-family: var(--serif); color: var(--gold-l); font-size: 12pt; letter-spacing: 3pt; margin-top: 6mm; }
-.back .line1 { color: #8A94B0; font-size: 9.4pt; margin-top: 9mm; }
-.back .line2 { color: #8A94B0; font-size: 9.4pt; margin-top: 2mm; }
-.back .gold { width: 14mm; height: 2pt; background: #D9A441; margin: 9mm auto 0; }
-.back .fine { color: rgba(138, 148, 176, .85); font-size: 8.5pt; margin-top: 8mm; line-height: 1.9; }
+.back-inner { text-align: center; max-width: 166mm; }
+.back h1 { font-family: var(--serif); font-size: 32pt; font-weight: 700; letter-spacing: 5pt; color: var(--red-deep); }
+.back .sub { font-family: var(--serif); color: var(--gold2); font-size: 11.5pt; letter-spacing: 2.5pt; margin-top: 5mm; }
+.back .gold { width: 16mm; height: 2.2pt; background: linear-gradient(90deg, var(--red), var(--gold)); margin: 8mm auto 0; border-radius: 1pt; }
+.roles { display: flex; gap: 6mm; margin-top: 10mm; }
+.roles .r {
+  flex: 1; background: var(--cream); border: 1px solid var(--line); border-top: 2.2pt solid var(--red);
+  border-radius: 8pt; padding: 7pt 4pt 6pt;
+}
+.roles .duty { font-size: 8.2pt; color: var(--muted); }
+.roles .name {
+  font-family: var(--serif); font-weight: 700; color: var(--ink); font-size: 9.8pt;
+  margin-top: 1.5pt; text-wrap: balance;   /* 长职名两行均衡断行，防末字孤行 */
+}
+.back .line1 { color: var(--ink); font-size: 9.4pt; margin-top: 9mm; letter-spacing: .5pt; }
+.back .line2 { color: var(--muted); font-size: 8.8pt; margin-top: 2.5mm; }
+.back .fine { color: var(--muted); font-size: 8.2pt; margin-top: 8mm; line-height: 1.95; }
 </style>
 </head>
 <body>
@@ -27,9 +37,14 @@ html, body { margin: 0; padding: 0; }
   <div class="back-inner">
     <h1>{{ back.title }}</h1>
     <div class="sub">{{ back.sub }}</div>
+    <div class="gold"></div>
+    <div class="roles">
+      {% for duty, name in back.roles %}
+      <div class="r"><div class="duty">{{ duty }}</div><div class="name">{{ name }}</div></div>
+      {% endfor %}
+    </div>
     <div class="line1">{{ back.line1 }}</div>
     <div class="line2">{{ back.line2 }}</div>
-    <div class="gold"></div>
     <div class="fine">
       本路书由 TripMate 多 Agent 协同旅游规划系统自动汇编，仅供出行参考<br>
       车票 / 酒店 / 门票请在官方渠道完成预订与支付（系统不接触支付）<br>

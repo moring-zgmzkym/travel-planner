@@ -84,7 +84,7 @@ def test_build_pdf_fallback_on_engine_failure(monkeypatch):
     """HTML 引擎抛异常 → 自动降级 reportlab cartoon，on_fallback 回调携原因触发。"""
     import tripmate.pdf_html as pdf_html
 
-    def _boom(profile, run_id):
+    def _boom(profile, run_id, theme=None):
         raise RuntimeError("engine boom")
 
     monkeypatch.setattr(pdf_html, "render", _boom)
@@ -112,7 +112,7 @@ def test_build_pdf_reportlab_switch(monkeypatch):
     """PDF_RENDERER=reportlab：一键回退 reportlab，HTML 引擎不应被触碰。"""
     import tripmate.pdf_html as pdf_html
 
-    def _boom(profile, run_id):
+    def _boom(profile, run_id, theme=None):
         raise AssertionError("HTML 引擎不应被调用")
 
     monkeypatch.setattr(pdf_html, "render", _boom)
@@ -133,13 +133,20 @@ def test_deliver_final_fallback_notify(monkeypatch):
     import asyncio
 
     import tripmate.pdf_html as pdf_html
+    from tripmate.models import GuideExtras
     from tripmate.status import StatusBus
     from tripmate.team import TeamContext, TeamRunner, TeamState, _deliver_final
 
-    def _boom(profile, run_id):
+    def _boom(profile, run_id, theme=None):
         raise RuntimeError("engine boom")
 
     monkeypatch.setattr(pdf_html, "render", _boom)
+
+    # 打桩锦囊提炼：本机 .env 配有真实 key，防单测触发真实 LLM 调用
+    async def _fake_extras(profile):
+        return GuideExtras()
+
+    monkeypatch.setattr("tripmate.team.build_guide_extras", _fake_extras)
     bb = _profile_bb()
     bus = StatusBus()
     runner = TeamRunner(bb, bus)

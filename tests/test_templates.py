@@ -79,7 +79,7 @@ def test_all_templates_survive_hostile_external_text():
 
 @pytest.mark.parametrize("name", TEMPLATE_NAMES)
 def test_template_render_with_routes(name):
-    """含每日路线画像：全部模板渲染路线表（含二维码绘制路径）不抛错。"""
+    """含每日路线画像：全部模板渲染路线表（含导航链接路径）不抛错。"""
     bb = _routes_profile_bb()
     path = REGISTRY[name].render(bb.profile, run_id=f"tplrt_{name}")
     data = Path(path).read_bytes()

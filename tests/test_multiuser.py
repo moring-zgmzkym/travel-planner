@@ -25,9 +25,17 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr("tripmate.memory.DATA_DIR", tmp_path / "mem")
     monkeypatch.setattr("tripmate.persistence.SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr(gw, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(gw, "OUTPUT_DIR", tmp_path / "outputs")  # PDF 交付/分享用临时产物目录（不依赖真实 outputs）
     gw.sessions.clear()
     yield tmp_path
     gw.sessions.clear()
+
+
+def _write_fake_pdf(name: str) -> None:
+    """在被隔离的 OUTPUT_DIR 写一个最小 PDF 头文件（gw.OUTPUT_DIR 已由夹具钉到临时目录）。"""
+    p = gw.OUTPUT_DIR / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"%PDF-1.4 fake-for-test")
 
 
 def _run(coro):
@@ -155,6 +163,7 @@ def _session_with_final(username: str, sid: str, pdf_name: str = "行程计划_�
 
 
 def test_pdf_route_ownership(isolated):
+    _write_fake_pdf("行程计划_成都_insuranc.pdf")
     _session_with_final("alice", "t1")
 
     async def main():
@@ -170,6 +179,7 @@ def test_pdf_route_ownership(isolated):
 
 
 def test_share_flow_public_access_and_revoke(isolated):
+    _write_fake_pdf("行程计划_成都_insuranc.pdf")
     _session_with_final("alice", "t1")
 
     async def main():

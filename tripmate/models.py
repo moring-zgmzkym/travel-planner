@@ -183,6 +183,33 @@ class RouteDay(BaseModel):
     total_km: float = 0.0
 
 
+class AlarmItem(BaseModel):
+    """抢约闹钟（PDF「抢约闹钟日历」行）：LLM 按行程日期倒排，失败留空走通用回退。"""
+
+    when: str = ""       # 时间点（"今天 · 立即" / "9月27日 20:00"）
+    action: str = ""     # 动作（"「故宫博物院」小程序抢 10/4 门票"）
+    channel: str = ""    # 渠道/要点（"12306 / 官方小程序；提前7天整点放票"）
+    difficulty: str = "" # 难度标注（"🔴 极难" / "🟡 中" / "⭐ 优先"）
+
+
+class DayTheme(BaseModel):
+    """每日主题（PDF「出发前90秒速览」日程表与逐日 banner 用），与 draft.days 逐日同序。"""
+
+    theme: str = ""      # 当日主题（"中轴皇城"，≤12 字）
+    line: str = ""       # 一条线讲完（"花篮→故宫→角楼餐→景山日落"，≤80 字）
+
+
+class GuideExtras(BaseModel):
+    """路书锦囊（PDF 出片之旅版式的新模块文案）：LLM 在定稿前一次提炼，失败留空走回退。
+    与 draft 绑定（每轮重规划后由 team.start() 必清组重置）。"""
+
+    overview_intro: str = ""            # 速览页"为什么这么排"引言（≤120 字）
+    day_themes: list[DayTheme] = Field(default_factory=list)
+    alarms: list[AlarmItem] = Field(default_factory=list)
+    hotel_verdict: str = ""             # 住宿三选一定稿理由（≤100 字）
+    rhythm_note: str = ""               # 节奏说明（≤80 字）
+
+
 class DraftFeedback(BaseModel):
     confirmed: bool = False
     feedback: str = ""
@@ -234,6 +261,7 @@ class TravelProfile(BaseModel):
     food_notes: list[FoodNote] = Field(default_factory=list)
     cover_images: list[str] = Field(default_factory=list)  # 封面城市宣传图候选（citycover_ 前缀，与素材图隔离）
     routes: list[RouteDay] = Field(default_factory=list)   # 每日路线与导航（finalize 阶段 route 通道写入）
+    guide_extras: GuideExtras | None = None  # 路书锦囊（定稿前 LLM 提炼；与 draft 绑定，每轮重规划清空）
     plan_input: PlanInput | None = None
     draft: Draft | None = None
     draft_feedback: DraftFeedback | None = None

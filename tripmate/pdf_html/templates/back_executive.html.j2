@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A4; margin: 0; }
+html, body { margin: 0; padding: 0; }
+{{ css|safe }}
+.back {
+  width: 210mm; height: 296.5mm; overflow: hidden; position: relative;
+  background: #FFFFFF; color: var(--ink);
+  display: flex; flex-direction: column;
+}
+.band { height: 6mm; background: #1F3A5F; }
+.band-line { height: 0.8pt; background: #1F3A5F; margin-top: 1.2mm; }
+.back-inner { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; max-width: 170mm; margin: 0 auto; }
+.back h1 { font-family: var(--sans); font-size: 30pt; font-weight: 700; letter-spacing: 5pt; color: #1F3A5F; }
+.back .sub { font-family: var(--sans); color: #56687A; font-size: 11.5pt; letter-spacing: 2pt; margin-top: 5mm; }
+.back .rule { width: 36mm; height: 1.6pt; background: #1F3A5F; margin-top: 7mm; }
+.roles { display: flex; width: 100%; border: 1pt solid #B4C0CE; border-radius: 2pt; overflow: hidden; margin-top: 9mm; }
+.roles .r { flex: 1; padding: 7pt 4pt 6pt; border-right: 1pt solid #B4C0CE; background: #FFFFFF; }
+.roles .r:last-child { border-right: none; }
+.roles .duty { font-size: 8.2pt; color: #8A93A0; }
+.roles .name {
+  font-family: var(--sans); font-weight: 700; color: #262B33; font-size: 9.8pt;
+  margin-top: 1.5pt; text-wrap: balance;
+}
+.back .line1 { color: #262B33; font-size: 9.4pt; margin-top: 9mm; letter-spacing: .5pt; }
+.back .line2 { color: #8A93A0; font-size: 8.8pt; margin-top: 2.5mm; }
+.back .fine { color: #8A93A0; font-size: 8.2pt; margin-top: 7mm; line-height: 1.95; }
+</style>
+</head>
+<body>
+<div class="back">
+  <div class="band"></div>
+  <div class="band-line"></div>
+  <div class="back-inner">
+    <h1>{{ back.title }}</h1>
+    <div class="sub">{{ back.sub }}</div>
+    <div class="rule"></div>
+    <div class="roles">
+      {% for duty, name in back.roles %}
+      <div class="r"><div class="duty">{{ duty }}</div><div class="name">{{ name }}</div></div>
+      {% endfor %}
+    </div>
+    <div class="line1">{{ back.line1 }}</div>
+    <div class="line2">{{ back.line2 }}</div>
+    <div class="fine">
+      本路书由 TripMate 多 Agent 协同旅游规划系统自动汇编，仅供出行参考<br>
+      车票 / 酒店 / 门票请在官方渠道完成预订与支付（系统不接触支付）<br>
+      天气、路线与价格为生成时点数据，出行前请再次核实
+    </div>
+  </div>
+</div>
+</body>
+</html>

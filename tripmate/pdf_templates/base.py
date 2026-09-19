@@ -423,24 +423,7 @@ class BaseTripTemplate:
         t.setStyle(TableStyle(cmds))
         return t
 
-    # ---- 每日路线（route 分区积木：站点徽章/地址 + 导航链接 + 二维码 + 段间连接行）----
-
-    def _qr_flowable(self, url: str, size_mm: float = 14):
-        """导航链接二维码（reportlab 自带 qr，无新依赖；实测 reportlab 5.0.1 中 QrCodeWidget
-        需装入 Drawing 并 scale 到目标尺寸）。失败返回 None——调用方省略二维码，仅留链接。"""
-        try:
-            from reportlab.graphics.barcode import qr as qr_mod
-            from reportlab.graphics.shapes import Drawing
-            widget = qr_mod.QrCodeWidget(url)
-            bounds = widget.getBounds()
-            side = max(bounds[2] - bounds[0], bounds[3] - bounds[1]) or 1.0
-            pt = size_mm * mm
-            d = Drawing(pt, pt)
-            d.add(widget)
-            d.scale(pt / side, pt / side)
-            return d
-        except Exception:  # noqa: BLE001 — QR 失败不阻塞 PDF
-            return None
+    # ---- 每日路线（route 分区积木：站点徽章/地址 + 导航链接 + 段间连接行）----
 
     def route_day_block(self, profile: TravelProfile, day_index: int) -> list:
         """第 day_index 天（0 基）的每日路线表（route 分区，与 draft.days 同序）。
@@ -486,9 +469,6 @@ class BaseTripTemplate:
             if s.nav_url:
                 nav.append(Paragraph(
                     f'<a href="{esc(s.nav_url)}" color="{self.PRIMARY_HEX}"><u>导航→</u></a>', st_link))
-                qr = self._qr_flowable(s.nav_url)
-                if qr is not None:
-                    nav.append(qr)
             elif s.reference_only:
                 nav.append(Paragraph(esc("参考值"), self.style(f"rtref{r}", 7.5, color=self.GRAY)))
             rows.append([badge, mid, nav or ""])

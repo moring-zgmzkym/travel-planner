@@ -31,6 +31,7 @@ from ..config import BASE_DIR, OUTPUT_DIR, ServerConfig, SESSIONS_DIR
 from ..llm import usage_summary
 from .. import maintenance
 from .. import memory
+from ..pdf_html.themes import get_theme as get_html_theme, list_themes
 from ..pdf_templates import get_template, list_templates
 from ..planning import compute_budget
 from ..session import Session
@@ -209,8 +210,14 @@ async def usage(sid: str | None = None, user: str = Depends(_auth_user)) -> JSON
 
 @app.get("/api/templates")
 async def templates() -> JSONResponse:
-    """PDF 模板列表（定稿时按黑板 basic_info.template 渲染）。"""
-    return JSONResponse({"templates": list_templates()})
+    """PDF 风格列表：HTML 主题（主路径）+ reportlab 注册表（降级引擎），engine 字段区分。"""
+    items = [{"name": t["name"], "display_name": t["display_name"],
+              "description": t["description"], "scenes": [], "engine": "html"}
+             for t in list_themes()]
+    items += [{"name": t["name"], "display_name": t["display_name"],
+               "description": t["description"], "scenes": t["scenes"], "engine": "reportlab"}
+              for t in list_templates()]
+    return JSONResponse({"templates": items})
 
 
 def _final_pdf_basename(sess: Session) -> str | None:
@@ -622,22 +629,32 @@ async def ws_endpoint(ws: WebSocket) -> None:
                         await _chat(ws, sess, {"type": "chat", "role": "system", "text": text})
                     elif kind == "template":
                         name = (msg.get("name") or "").strip()
+                        # 校验顺序：HTML 主题（主路径）→ reportlab 注册表（降级引擎）→ 拒绝
+                        resolved, display, engine = None, "", "html"
                         try:
-                            tpl = get_template(name or None)
+                            cfg = get_html_theme(name or None)
+                            resolved, display = cfg["name"], cfg["display_name"]
                         except ValueError:
+                            try:
+                                tpl = get_template(name or None)
+                                resolved, display, engine = tpl.name, tpl.display_name, "reportlab"
+                            except ValueError:
+                                resolved = None
+                        if resolved is None:
                             await _chat(ws, sess, {"type": "chat", "role": "system",
                                                    "text": f"未知的模板样式 '{name}'，请重新选择。"})
                             continue
                         try:
                             await sess.bb.apply_basic_info(
-                                {"template": tpl.name}, "chatter", "用户选择 PDF 模板")
+                                {"template": resolved}, "chatter", "用户选择 PDF 模板")
                         except Exception as e:  # noqa: BLE001 — 模板写库失败不烧连接（2026-09-04 加固）
                             AUDIT.output("Gateway", f"模板切换写入失败（{type(e).__name__}: {e}）")
                             await _chat(ws, sess, {"type": "chat", "role": "system",
                                                    "text": "模板切换没有成功，请稍后再试一次。"})
                             continue
+                        engine_note = "" if engine == "html" else "（降级引擎，仅 PDF_RENDERER=reportlab 时实际使用）"
                         await _chat(ws, sess, {"type": "chat", "role": "system",
-                                               "text": f"已切换路书样式为「{tpl.display_name}」，定稿时将使用该模板。"})
+                                               "text": f"已切换路书样式为「{display}」{engine_note}，定稿时将使用该模板。"})
                         await _send(_route_ws(sess, ws), {"type": "profile", "profile": sess.profile_snapshot()}, sess)
                     elif kind == "chat":
                         text = (msg.get("text") or "").strip()

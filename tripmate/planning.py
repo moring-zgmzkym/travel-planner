@@ -103,9 +103,9 @@ def compute_budget(profile: TravelProfile, draft: Draft | None) -> dict[str, Any
     budget_max = basic.budget_max or (budget * 1.2 if budget else 0)
     warnings: list[str] = []
     if budget_max and total > budget_max:
-        warnings.append(f"总预算 {total:g} 元已超出最大预算 {budget_max:g} 元，建议压缩：优先下调住宿标准/减少收费景点")
+        warnings.append(f"总花费 {total:g} 元已超出最大预算 {budget_max:g} 元，建议压缩：优先下调住宿标准/减少收费景点")
     elif budget and total > budget * 0.9:
-        warnings.append(f"总预算 {total:g} 元已占用预算 {budget:g} 元的 {total / budget:.0%}（>90% 预警）")
+        warnings.append(f"总花费 {total:g} 元已占用预算 {budget:g} 元的 {total / budget:.0%}（>90% 预警）")
 
     items = [
         {"item": "交通", "note": transport_note, "amount": round(transport, 1)},

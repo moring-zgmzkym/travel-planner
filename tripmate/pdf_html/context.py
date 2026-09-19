@@ -18,15 +18,16 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 from ..config import OUTPUT_DIR
-from ..models import TravelProfile
+from ..models import GuideExtras, TravelProfile
 from ..planning import compute_budget
 from ..tools.weather import outfit_advice, weather_emoji
+from .themes import get_theme, resolve_theme
 
 # 与 pdf_templates/base.py 目的地消毒规则保持一致（HTML 路径独立成包，不反向依赖 reportlab 层）
 _DEST_BAD = re.compile(r'[\\/:*?"<>|\r\n]')
 
-# 参考样张《陕西3天2晚懒人版旅行路书_图文版.pdf》实测图表色板（依次取用）
-PALETTE = ["#4A599D", "#B3BEDC", "#C4593F", "#D9A441", "#94B497", "#7E8E5E"]
+# 图表色板默认值（lushu 主题；其余主题经 build_context 从 themes 配置注入）
+PALETTE = ["#B03A2E", "#D9A441", "#2E3766", "#5F7E62", "#C7803C", "#8A94B0"]
 _STOP_BADGE = {"spot": "🏛", "meal": "🍜", "hotel": "🏨"}
 
 
@@ -37,7 +38,7 @@ def output_path(profile: TravelProfile, run_id: str) -> Path:
 
 
 def _safe_url(url: str) -> str:
-    """仅放行 http(s) 链接（LLM/外部文本进 href 与二维码前的白名单）。"""
+    """仅放行 http(s) 链接（LLM/外部文本进 href 前的白名单）。"""
     u = (url or "").strip()
     return u if u.startswith(("http://", "https://")) else ""
 
@@ -59,30 +60,6 @@ def _img_uri(path: str, max_w: int = 1600) -> str:
             im.save(buf, "JPEG", quality=85)
         return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception:  # noqa: BLE001 — 单图失败回退占位，不阻塞
-        return ""
-
-
-def _qr_svg(url: str) -> str:
-    """导航链接 → 内联 SVG 二维码（reportlab QrCodeWidget + renderSVG，纯 Python 无新依赖，
-    与 reportlab 路径 base._qr_flowable 同一二维码实现）。失败返回空串——模板退化为纯链接。"""
-    if not _safe_url(url):
-        return ""
-    try:
-        from reportlab.graphics import renderSVG
-        from reportlab.graphics.barcode import qr as qr_mod
-        from reportlab.graphics.shapes import Drawing
-        widget = qr_mod.QrCodeWidget(url)
-        bounds = widget.getBounds()
-        side = max(bounds[2] - bounds[0], bounds[3] - bounds[1]) or 1.0
-        d = Drawing(100, 100)
-        d.add(widget)
-        d.scale(100 / side, 100 / side)
-        out = renderSVG.drawToString(d)  # reportlab 各版本可能返回 str 或 bytes
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
-        svg = out[out.index("<svg"):]    # 去掉 XML 声明/DOCTYPE，内嵌 HTML
-        return svg.replace("<svg ", '<svg style="width:13mm;height:13mm;display:block" ', 1)
-    except Exception:  # noqa: BLE001 — QR 失败不阻塞
         return ""
 
 
@@ -122,8 +99,11 @@ def _caption_map(profile: TravelProfile) -> dict:
     return caption
 
 
-def _donut_svg(items: list[tuple[str, float]], total: float) -> str:
+def _donut_svg(items: list[tuple[str, float]], total: float,
+               ink: str = "#2E3766", muted: str = "#7C7A8C",
+               palette: list[str] | None = None) -> str:
     """预算构成环形图（SVG stroke-dasharray；插值仅数值/色值，无转义需求）。"""
+    palette = palette or PALETTE
     pts = [(label, float(a)) for label, a in items if isinstance(a, (int, float)) and a > 0]
     if not pts or total <= 0:
         return ""
@@ -136,19 +116,21 @@ def _donut_svg(items: list[tuple[str, float]], total: float) -> str:
     for i, (_, amount) in enumerate(pts):
         frac = min(amount / total, 1.0)
         segs.append(
-            f'<circle cx="{c}" cy="{c}" r="{r}" fill="none" stroke="{PALETTE[i % len(PALETTE)]}" '
+            f'<circle cx="{c}" cy="{c}" r="{r}" fill="none" stroke="{palette[i % len(palette)]}" '
             f'stroke-width="26" stroke-dasharray="{frac * circ:.2f} {circ:.2f}" '
             f'stroke-dashoffset="{-off * circ:.2f}" transform="rotate(-90 {c} {c})"/>')
         off += frac
     center = (f'<text x="{c}" y="{c - 2}" text-anchor="middle" font-size="13" font-weight="700" '
-              f'fill="#2E3766" font-family="Noto Serif SC,serif">¥{total:g}</text>'
-              f'<text x="{c}" y="{c + 15}" text-anchor="middle" font-size="8" fill="#7C7A8C">'
+              f'fill="{ink}" font-family="STZhongsong,SimSun,serif">¥{total:g}</text>'
+              f'<text x="{c}" y="{c + 15}" text-anchor="middle" font-size="8" fill="{muted}">'
               f'合计（全团口径）</text>')
     return f'<svg viewBox="0 0 140 140" style="width:42mm;height:42mm">{"".join(segs)}{center}</svg>'
 
 
-def _stack_svg(items: list[tuple[str, float]], total: float) -> str:
+def _stack_svg(items: list[tuple[str, float]], total: float,
+               palette: list[str] | None = None) -> str:
     """预算构成横向堆叠条（与环形图同一份数据、同一组色）。"""
+    palette = palette or PALETTE
     pts = [(label, float(a)) for label, a in items if isinstance(a, (int, float)) and a > 0]
     if not pts or total <= 0:
         return ""
@@ -159,14 +141,15 @@ def _stack_svg(items: list[tuple[str, float]], total: float) -> str:
         if frac <= 0:
             break
         rects.append(f'<rect x="{x:.2f}" y="0" width="{frac * 100:.2f}" height="{h}" '
-                     f'fill="{PALETTE[i % len(PALETTE)]}"/>')
+                     f'fill="{palette[i % len(palette)]}"/>')
         x += frac * 100.0
     return (f'<svg viewBox="0 0 {w} {h}" preserveAspectRatio="none" '
             f'style="width:100%;height:16pt;display:block;border-radius:4pt">'
             f'{"".join(rects)}</svg>')
 
 
-def _temp_svg(weather_days: list[dict]) -> str:
+def _temp_svg(weather_days: list[dict], accent: str = "#D9A441",
+              accent_text: str = "#B9862E", muted: str = "#7C7A8C") -> str:
     """逐日最高温折线（weather.days 含数值温度才渲染；日期为内部数据，仍经 escape）。"""
     pts = [(str(d.get("date") or ""), d.get("temp_max"))
            for d in weather_days if isinstance(d.get("temp_max"), (int, float))]
@@ -179,19 +162,24 @@ def _temp_svg(weather_days: list[dict]) -> str:
     step = (w - 2 * pad) / (len(pts) - 1)
     xy = [(pad + i * step, h - pad - (t - lo) / span * (h - 2 * pad)) for i, (_, t) in enumerate(pts)]
     parts = [f'<polyline points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in xy)}" fill="none" '
-             f'stroke="#D9A441" stroke-width="2.5"/>']
+             f'stroke="{accent}" stroke-width="2.5"/>']
     for (x, y), (date_s, t) in zip(xy, pts):
-        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.2" fill="#D9A441"/>')
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.2" fill="{accent}"/>')
         parts.append(f'<text x="{x:.1f}" y="{y - 8:.1f}" text-anchor="middle" font-size="10" '
-                     f'fill="#B9862E">{int(t)}°</text>')
+                     f'fill="{accent_text}">{int(t)}°</text>')
         parts.append(f'<text x="{x:.1f}" y="{h - 10:.1f}" text-anchor="middle" font-size="8.5" '
-                     f'fill="#7C7A8C">{escape(date_s[5:] or date_s)}</text>')
+                     f'fill="{muted}">{escape(date_s[5:] or date_s)}</text>')
     return (f'<svg viewBox="0 0 {w} {h}" style="width:100%;height:auto;display:block">'
             f'{"".join(parts)}</svg>')
 
 
-def build_context(profile: TravelProfile) -> dict:
-    """TravelProfile → 模板上下文（封面/正文/封底共用）。"""
+def build_context(profile: TravelProfile, theme: str | None = None) -> dict:
+    """TravelProfile → 模板上下文（封面/正文/封底共用）。
+
+    theme：主题名（themes.THEMES 键），None/未知回退默认主题；决定图表色板、
+    甘特色块与章节文案（chapters/sec_titles），正文 12 章结构全主题共用。"""
+    cfg = get_theme(resolve_theme(theme))
+    palette = cfg["palette"]
     basic, detail = profile.basic_info, profile.detail_info
     draft = profile.draft
     party = detail.party_size or basic.party_size or 1
@@ -239,7 +227,8 @@ def build_context(profile: TravelProfile) -> dict:
     weather = {
         "rows": weather_rows,
         "source": profile.weather.get("source", ""),
-        "curve": _temp_svg(wdays),
+        "curve": _temp_svg(wdays, accent=cfg["svg_accent"],
+                           accent_text=cfg["svg_accent_text"], muted=cfg["svg_muted"]),
     } if wdays else None
 
     # ---- 订单清单（勾选/链接/参考值标注，对齐 classic 叁章）----
@@ -247,14 +236,15 @@ def build_context(profile: TravelProfile) -> dict:
     for tk in profile.tickets:
         order_rows.append({
             "kind": "车票", "name": tk.train_no,
-            "info": f"{tk.depart_time} 出发 / {tk.arrive_time} 到达，{tk.price:g} 元",
+            "info": f"{tk.depart_time} 出发 / {tk.arrive_time} 到达，{tk.price:g}\u00A0元",
             "reason": tk.reason or "", "selected": tk.selected,
             "link": _safe_url(tk.link), "link_label": "12306 购票",
         })
     for h in profile.hotels:
         order_rows.append({
             "kind": "酒店", "name": h.name,
-            "info": f"{h.price_per_night:g} 元/晚，距地标 {h.distance_km:g}km，评分 {h.rating:g}",
+            "info": (f"{h.price_per_night:g}\u00A0元/晚，距地标\u00A0{h.distance_km:g}km，"
+                     f"评分\u00A0{h.rating:g}"),
             "reason": h.reason or "", "selected": h.selected,
             "link": _safe_url(h.link), "link_label": "携程订房",
         })
@@ -292,7 +282,6 @@ def build_context(profile: TravelProfile) -> dict:
                     "kind": s.kind, "badge": _STOP_BADGE.get(s.kind, "🏛"), "label": label,
                     "address": s.address or "", "note": s.note or "",
                     "nav_url": _safe_url(s.nav_url), "reference_only": s.reference_only,
-                    "qr": _qr_svg(s.nav_url),
                 })
                 if j < len(rd.stops) - 1 and j < len(rd.segments):
                     seg = rd.segments[j]
@@ -334,6 +323,74 @@ def build_context(profile: TravelProfile) -> dict:
             "route": route, "photos": photos,
         })
 
+    # ---- 出发前90秒速览（数据 chips + 每日主题表；主题/一条线优先取 LLM 锦囊）----
+    extras: GuideExtras = profile.guide_extras or GuideExtras()
+    nights = max((basic.days or 1) - 1, 0)
+    dates_short = _short_dates(basic.travel_dates)
+    budget_head = f"¥{basic.budget:g}" if basic.budget else "预算待定"
+    per_head = f"≈¥{basic.budget / party:g}/人" if basic.budget and party else budget_head
+    stat_chips = [
+        (f"{party} 人", "结伴同行"),
+        (f"{basic.days or '-'} 天 {nights} 晚", f"{basic.travel_mode or '高铁'} 往返"),
+        (per_head, f"总预算 {budget_head}" if basic.budget else "预算参考"),
+        (dates_short or "日期待定", "出行窗口"),
+    ]
+    theme_rows = []
+    for i, d in enumerate(draft.days if draft else []):
+        rd = profile.routes[i] if i < len(profile.routes) else None
+        th = extras.day_themes[i] if i < len(extras.day_themes) else None
+        theme = (th.theme if th and th.theme else "")
+        if not theme:
+            theme = " · ".join(d.spots[:2]) or ("自由安排" if not (d.morning or d.afternoon or d.evening) else "当日行程")
+        line = (th.line if th and th.line else "") or (" → ".join(d.spots[:5]) if d.spots
+                else " · ".join(x for x in (d.morning, d.afternoon, d.evening) if x)[:76])
+        meta = (f"{len(rd.stops)} 个点位 · 约 {rd.total_km:g} km" if rd and rd.stops else "")
+        theme_rows.append({
+            "label": f"D{i + 1}", "date": d.date, "weekday": _weekday(d.date, basic.travel_dates),
+            "theme": theme, "line": line or "—", "meta": meta,
+        })
+    snapshot = {
+        "chips": stat_chips,
+        "intro": extras.overview_intro,
+        "day_rows": theme_rows,
+    } if theme_rows or stat_chips else None
+    for i, tr in enumerate(theme_rows):   # 逐日 banner 复用同一份当日主题
+        if i < len(day_ctx):
+            day_ctx[i]["theme"] = tr["theme"]
+
+    # ---- 抢约闹钟日历（锦囊优先；无锦囊时由已选车票/必去点确定性回退；两者皆无则隐藏）----
+    alarm_rows = [{"when": a.when, "action": a.action, "channel": a.channel,
+                   "difficulty": a.difficulty or "🟡 中"}
+                  for a in extras.alarms if a.when or a.action]
+    if not alarm_rows:
+        year = basic.travel_dates[0][:4] if basic.travel_dates and basic.travel_dates[0][:4].isdigit() else ""
+        sel_tks = [t for t in profile.tickets if t.selected] or list(profile.tickets[:2])
+        for t in sel_tks[:2]:
+            d = _parse_day(basic.travel_dates[0], year) if basic.travel_dates else None
+            when = f"{d:%m月%d日} 前 15 天" if d else "开售即抢"
+            alarm_rows.append({"when": when, "action": f"12306 抢 {t.train_no} 车票"
+                               f"（{t.depart_time} 开出，{t.price:g} 元/人）",
+                               "channel": "开售即抢；候补与同窗备选班次同步提交", "difficulty": "🔴 紧俏"})
+        if detail.must_visit:
+            alarm_rows.append({"when": "出发前 1-7 天", "difficulty": "🟡 中",
+                               "action": f"「{'」「'.join(detail.must_visit[:2])}」等热门景点实名预约",
+                               "channel": "博物馆/古迹类多需提前 1-7 天在官方公众号或小程序预约"})
+    alarms = {"rows": alarm_rows} if alarm_rows else None
+
+    # ---- 行程节奏甘特（draft 三段 → 色块行；纯展示，无时刻数据不编造钟点）----
+    gantt = None
+    if draft and draft.days:
+        g_morning, g_afternoon, g_evening = cfg["gantt_colors"]
+        gantt = {
+            "note": extras.rhythm_note or "每天按「上午 / 下午 / 晚上」三段推进，累了就停，留白比赶路更重要。",
+            "colors": cfg["gantt_colors"],
+            "rows": [{"label": f"D{i + 1}", "date": d.date,
+                      "blocks": [(g_morning, "上午", d.morning or "自由安排"),
+                                 (g_afternoon, "下午", d.afternoon or "自由安排"),
+                                 (g_evening, "晚上", d.evening or "自由安排")]}
+                     for i, d in enumerate(draft.days)],
+        }
+
     # ---- 预算（数据源 compute_budget，对齐 classic 伍章）----
     budget_ctx = None
     if draft:
@@ -341,7 +398,7 @@ def build_context(profile: TravelProfile) -> dict:
         items = [(str(r.get("item", "")), float(r.get("amount") or 0)) for r in b["items"]]
         occ = max(0.0, min(float(b["occupancy"] or 0), 1.0))
         legend = [{"label": lb, "amount": f"¥{a:g}",
-                   "color": PALETTE[i % len(PALETTE)]} for i, (lb, a) in enumerate(items)]
+                   "color": palette[i % len(palette)]} for i, (lb, a) in enumerate(items)]
         budget_ctx = {
             "rows": [{"item": r.get("item", ""), "note": r.get("note", ""),
                       "amount": f"{float(r.get('amount') or 0):g}"} for r in b["items"]],
@@ -350,11 +407,12 @@ def build_context(profile: TravelProfile) -> dict:
             "total": f"{b['total']:g}",
             "occ_pct": f"{float(b['occupancy'] or 0):.0%}",
             "occ_bar": f"{occ * 100:.0f}%",   # 条宽按 clamp 后比例画（口径与 classic 一致）
-            "occ_color": "#C4593F" if occ >= 0.9 else "#2E3766",
+            "occ_color": cfg["occ_warn"] if occ >= 0.9 else cfg["occ_ok"],
             "occ_disp": f"预算占用 {float(b['occupancy'] or 0):.0%}（合计 {b['total']:g} 元）",
             "warnings": list(b["warnings"]),
-            "donut": _donut_svg(items, float(b["total"] or 0)),
-            "stack": _stack_svg(items, float(b["total"] or 0)),
+            "donut": _donut_svg(items, float(b["total"] or 0), ink=cfg["svg_ink"],
+                                muted=cfg["svg_muted"], palette=palette),
+            "stack": _stack_svg(items, float(b["total"] or 0), palette=palette),
             "legend": legend,
         }
 
@@ -367,16 +425,19 @@ def build_context(profile: TravelProfile) -> dict:
             "source_note": "" if cap else (("来源：" + (item.source or "")[:93]) if item.source else ""),
         })
 
-    # ---- 酒店（Top3 卡片，对齐 classic 柒章）----
+    # ---- 酒店（三选一定稿：评分序 A★主推/B/C；定稿理由优先取 LLM 锦囊）----
+    hotel_tags = ("★ 主推 A · 综合最优", "备选 B · 体验升级", "备选 C · 预算友好")
     hotels = []
     for rank, h in enumerate(profile.hotels[:3], 1):
         hotels.append({
             "rank": rank, "name": h.name, "selected": h.selected,
+            "tag": hotel_tags[rank - 1],
             "meta": f"★ {h.rating:g}｜{h.price_per_night:g} 元/晚｜距地标 {h.distance_km:g}km",
             "desc": (f"网络评价：{h.review_digest}" if h.review_digest
                      else f"推荐理由：{h.reason or '综合评分靠前'}"),
             "img_uri": _img_uri(h.image_path),
         })
+    hotel_verdict = extras.hotel_verdict
 
     # ---- 美食（三态回退，对齐 classic 捌章）----
     if profile.food_notes:
@@ -408,7 +469,6 @@ def build_context(profile: TravelProfile) -> dict:
     sources = [{"name": g.source_name, "url": g.source_url, "fetched": g.fetched_at}
                for g in profile.guide_digest[:3]]
 
-    nights = max((basic.days or 1) - 1, 0)
     cover = _cover_ctx(profile, party, nights)
     return {
         "basic": {
@@ -420,12 +480,20 @@ def build_context(profile: TravelProfile) -> dict:
         "overview_rows": overview_rows,
         "rhythm_line": rhythm_line,
         "principles": _GENERIC_PRINCIPLES,
+        "chapters": cfg["chapter_labels"],
+        "sec_titles": cfg["titles"],
+        "theme_name": cfg["display_name"],
+        "tl_colors": cfg["gantt_colors"],   # 逐日时间轴圆点（上午/下午/晚上，与甘特同色）
+        "snapshot": snapshot,
+        "alarms": alarms,
+        "gantt": gantt,
         "weather": weather,
         "orders": orders,
         "days": day_ctx,
         "budget": budget_ctx,
         "gallery": gallery,
         "hotels": hotels,
+        "hotel_verdict": hotel_verdict,
         "foods": foods,
         "warnings": warns,
         "sources": sources,
@@ -437,44 +505,50 @@ def build_context(profile: TravelProfile) -> dict:
         "cover": cover,
         "back": {
             "title": "旅途愉快",
-            "sub": " · ".join(basic.style or []) or "轻松出行",
-            "line1": f"{basic.origin or ''} — {basic.destination or ''} · "
-                     f"{basic.days or '-'} 天行程 · {party} 人同行".strip(" —·"),
+            "sub": f"{basic.destination or '旅行'} · {basic.days or '-'} 天 {nights} 晚 · {party} 人同行",
+            "roles": _TEAM_ROLES,
+            "line1": f"{basic.origin or ''} — {basic.destination or ''} · {dates_txt}".strip(" —·"),
             "line2": f"TripMate 多 Agent 协同旅游规划系统 · {datetime.now():%Y 年 %m 月} 统筹汇编",
         },
     }
 
 
 def _cover_ctx(profile: TravelProfile, party: int, nights: int) -> dict:
+    """封面（出片之旅样张版式）：实景照片满版 + 红徽标 + 主题词 + 衬线大标题 + 数据 chips +
+    抢票倒计时条；无图时模板回退深色渐变，版式仍成立。"""
     basic = profile.basic_info
     days = basic.days or "-"
-    nights_txt = f"{days} 天 {nights} 晚" if nights > 0 else f"{days} 天"
-    tagline = " · ".join(basic.style or []) or "轻松出行"
-    chips = (basic.style or [])[:4] or ["休闲"]
+    dates_short = _short_dates(basic.travel_dates)
+    styles = [s for s in (basic.style or []) if s]
     stats = [
-        (nights_txt, f"{basic.travel_mode or '高铁'} 往返"),
-        (basic.travel_dates[0] if basic.travel_dates else (basic.date_text or "日期待定"), "出行时间"),
-        (f"{party} 人", "同行人数"),
+        (dates_short or "日期待定", f"{days} 天 {nights} 晚" if nights > 0 else f"{days} 天行程"),
         (f"¥{int(basic.budget)}" if basic.budget else "-", "预算参考"),
+        (f"{party} 人", f"{basic.travel_mode or '高铁'} 往返"),
+        (f"{len(profile.detail_info.must_visit)} 个" if profile.detail_info.must_visit else "-",
+         "必去点位"),
     ]
-    # 封面底图：城市宣传图优先，无则取第一张实拍（示意/占位跳过，与 day_photo 同规则）
-    strip_uri = ""
+    # 满版底图：城市宣传图优先，无则取第一张实拍（示意/占位跳过，与 day_photo 同规则）
+    cover_uri = ""
     for p in (profile.cover_images or []):
-        strip_uri = _img_uri(p, max_w=1400)
-        if strip_uri:
+        cover_uri = _img_uri(p, max_w=1600)
+        if cover_uri:
             break
-    if not strip_uri:
+    if not cover_uri:
         for item in _real_images(profile)[:1]:
-            strip_uri = _img_uri(item.path, max_w=1400)
+            cover_uri = _img_uri(item.path, max_w=1600)
     return {
-        "badge": f"{basic.origin or '出发地'}出发 · {tagline}",
-        "title": basic.destination or "旅行",
-        "subtitle": f"{nights_txt}旅行路书",
-        "en_line": f"{basic.origin or ''} — {basic.destination or 'TRIP'} · TRIPMATE ITINERARY"
-                   .strip(" —").upper(),
-        "chips": chips,
+        "badge": f"{basic.destination or '旅行'} · 出行计划",
+        "en_line": (f"{basic.origin or ''} — {basic.destination or 'TRIP'} "
+                    f"TRAVEL ITINERARY · {datetime.now():%Y}").strip(" —").upper(),
+        "motto": " × ".join(styles[:3]) or "轻松出行 × 慢慢看",
+        "title": f"{basic.destination or '旅行'}{days}天出行路书。",
+        "subtitle": (f"{basic.origin or ''} 出发 · {dates_short or basic.date_text or '日期待定'}"
+                     f" · {party} 人同行").strip(" ·"),
+        "doc_no": f"{datetime.now():%Y}—{basic.destination or 'TM'}",
+        "days_nights": f"{nights} 晚 {days} 天" if nights > 0 else f"{days} 天",
         "stats": stats,
-        "strip_uri": strip_uri,
+        "countdown": _countdown(profile),
+        "cover_uri": cover_uri,
         "foot": f"TripMate 多 Agent 系统统筹生成 · {datetime.now():%Y 年 %m 月}",
     }
 
@@ -493,7 +567,56 @@ def _weekday(date_str: str, travel_dates: list) -> str:
     return ""
 
 
+def _parse_day(date_str: str, year_hint: str = ""):
+    """"2026-10-01"/"10-01" → date（%m-%d 年份取 year_hint 前四位）；失败返回 None。"""
+    from datetime import datetime as _dt
+    for fmt in ("%Y-%m-%d", "%m-%d"):
+        try:
+            d = _dt.strptime((date_str or "").strip(), fmt)
+            if fmt == "%m-%d" and year_hint[:4].isdigit():
+                d = d.replace(year=int(year_hint[:4]))
+            return d.date()
+        except ValueError:
+            continue
+    return None
+
+
+def _short_dates(travel_dates: list) -> str:
+    """出行窗口短格式（"2026-10-01"…→ "10.01–10.04"）；不可解析回退原文本首项。"""
+    if not travel_dates:
+        return ""
+    d0, d1 = _parse_day(travel_dates[0]), _parse_day(travel_dates[-1])
+    if not d0:
+        return str(travel_dates[0])
+    if d1 and d1 != d0:
+        return f"{d0:%m.%d}–{d1:%m.%d}"
+    return f"{d0:%m.%d}"
+
+
+def _countdown(profile: TravelProfile) -> str:
+    """封面抢票倒计时条（出片之旅样张版式）：出行日期倒推 15 天为开抢口径；
+    日期不可解析或无车票时返回空串，封面自动隐藏该条。"""
+    basic = profile.basic_info
+    tks = [t for t in profile.tickets if t.selected] or list(profile.tickets[:1])
+    base = basic.travel_dates
+    if not tks or not base:
+        return ""
+    year = base[0][:4] if base[0][:4].isdigit() else ""
+    dep, ret = _parse_day(base[0], year), (_parse_day(base[-1], year) if len(base) > 1 else None)
+    if not dep:
+        return ""
+    from datetime import timedelta
+    bits = [f"{dep - timedelta(days=15):%m月%d日} 前后抢去程 {tks[0].train_no}"]
+    if ret and ret != dep:
+        bits.append(f"{ret - timedelta(days=15):%m月%d日} 前后抢返程")
+    return "行前抢票倒计时：" + " · ".join(bits) + " —— 闹钟现在就设"
+
+
 # ---- 通用内容（TripMate 数据模型无对应字段，按已确认决策补齐并标注"通用建议"）----
+
+# 封底团队分工（呼应 4-Agent 架构，出片之旅样张封底版式）
+_TEAM_ROLES = [("行程统筹", "首席行程主理人"), ("景点调研", "风光体验官"),
+               ("交通动线", "交通动线规划师"), ("食宿方案", "食宿品鉴专家")]
 
 _GENERIC_PRINCIPLES = [
     ("晨", "不早起赶场", "核心景点安排在状态最好的上午，出门时间以睡饱为前提。"),

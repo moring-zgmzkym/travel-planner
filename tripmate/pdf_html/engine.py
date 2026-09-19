@@ -19,13 +19,10 @@ from pathlib import Path
 from ..models import TravelProfile
 from ..status import AUDIT
 from .context import build_context, output_path
+from .themes import get_theme, resolve_theme
 
 _LOCK = threading.Lock()
 _TPL_DIR = Path(__file__).parent / "templates"
-
-# 章节标题 → PDF 书签（在正文中定位，找不到的条目跳过）
-_TOC_TITLES = ("行程总览", "天气与穿搭", "推荐订单清单", "逐日行程", "预算核算",
-               "实景速览", "推荐酒店", "美食推荐", "行前准备", "应急预案")
 
 
 def _env():
@@ -72,7 +69,7 @@ def _render_all(parts: list[tuple[str, bool]]) -> list[bytes]:
         pw.stop()
 
 
-def _assemble(pdfs: list[bytes], out: Path, ctx: dict) -> int:
+def _assemble(pdfs: list[bytes], out: Path, ctx: dict, cfg: dict) -> int:
     """合并三段 → 盖页码 → 加书签 → 元数据 → 同目录临时文件原子落盘。返回总页数。"""
     import pymupdf
     merged = pymupdf.open()
@@ -81,8 +78,8 @@ def _assemble(pdfs: list[bytes], out: Path, ctx: dict) -> int:
             with pymupdf.open(stream=part, filetype="pdf") as src:
                 merged.insert_pdf(src)
         total = merged.page_count
-        gray = (124 / 255, 122 / 255, 140 / 255)          # 正文页码 #7C7A8C
-        light = (138 / 255, 148 / 255, 176 / 255)         # 封底页码 #8A94B0
+        gray = cfg["page_num"]          # 正文页码色
+        light = cfg["page_num_last"]    # 封底页码色
         for i in range(1, total):                          # 封面不盖页码
             page = merged[i]
             text = f"{i + 1} / {total}"
@@ -91,7 +88,8 @@ def _assemble(pdfs: list[bytes], out: Path, ctx: dict) -> int:
                              text, fontname="helv", fontsize=8.5,
                              color=light if i == total - 1 else gray)
         toc = [[1, "封面", 1]]
-        for title in _TOC_TITLES:
+        # 章节标题 → 书签（按主题文案在正文中定位，找不到的条目跳过）
+        for title in cfg["titles"]:
             for pno in range(1, total - 1):
                 if merged[pno].search_for(title):
                     toc.append([1, title, pno + 1])
@@ -104,7 +102,7 @@ def _assemble(pdfs: list[bytes], out: Path, ctx: dict) -> int:
             "author": "TripMate 多 Agent 系统",
             "subject": f"{b['origin']}—{b['destination']} {b['dates_txt']} 行程计划",
             "creator": "TripMate",
-            "producer": "TripMate pdf_html (Chromium)",
+            "producer": f"TripMate pdf_html (Chromium) · {cfg['display_name']}",
         })
         tmp = out.with_name(out.stem + ".tmp.pdf")
         merged.save(str(tmp), garbage=3, deflate=True)
@@ -114,21 +112,25 @@ def _assemble(pdfs: list[bytes], out: Path, ctx: dict) -> int:
         merged.close()
 
 
-def render(profile: TravelProfile, run_id: str) -> str:
-    """渲染唐风路书 PDF，返回成品绝对路径（与 reportlab 路径同一命名规则）。"""
+def render(profile: TravelProfile, run_id: str, theme: str | None = None) -> str:
+    """渲染路书 PDF，返回成品绝对路径（与 reportlab 路径同一命名规则）。
+
+    theme：主题名（themes.THEMES 键）；None/未知回退默认主题。"""
     t0 = time.monotonic()
     out = output_path(profile, run_id)
-    ctx = build_context(profile)
+    theme_name = resolve_theme(theme)
+    cfg = get_theme(theme_name)
+    ctx = build_context(profile, theme=theme_name)
     env = _env()
-    css = (_TPL_DIR / "lushu.css").read_text(encoding="utf-8")
+    css = (_TPL_DIR / cfg["css"]).read_text(encoding="utf-8")
     parts = [
-        (env.get_template("cover.html.j2").render(css=css, **ctx), True),
+        (env.get_template(cfg["cover"]).render(css=css, **ctx), True),
         (env.get_template("body.html.j2").render(css=css, **ctx), False),
-        (env.get_template("back.html.j2").render(css=css, **ctx), True),
+        (env.get_template(cfg["back"]).render(css=css, **ctx), True),
     ]
     with _LOCK:  # 串行化：防并发会话同时多开 Chromium
         pdfs = _render_all(parts)
-        total = _assemble(pdfs, out, ctx)
-    AUDIT.observation("PdfHtml", f"HTML 路书渲染完成：{out.name}（{total} 页，"
+        total = _assemble(pdfs, out, ctx, cfg)
+    AUDIT.observation("PdfHtml", f"路书渲染完成[{theme_name}]：{out.name}（{total} 页，"
                                  f"{time.monotonic() - t0:.1f}s，Chromium）")
     return str(out)

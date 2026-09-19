@@ -354,6 +354,8 @@ function addFinal(m) {
 function renderProfile(p) {
   $("profile-ver").textContent = "v" + (p.version || 0);
   const b = p.basic_info || {}, d = p.detail_info || {};
+  currentTemplate = b.template || "lushu";
+  applyStyleSelection(currentTemplate); // 回显当前路书风格（旧值不在列表则显示默认）
   const rows = [];
   const kv = (k, v) => v ? rows.push(`<span class="k">${k}</span> ${esc(String(v))}`) : null;
   kv("出发地", b.origin); kv("目的地", b.destination); kv("天数", b.days);
@@ -482,6 +484,45 @@ function setBusy(v) {
 $("stop-plan").addEventListener("click", () => {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "stop" }));
 });
+
+/* ---------- 路书风格选择（定稿 PDF 使用；列表来自 /api/templates 的 html 主题） ---------- */
+let currentTemplate = "lushu"; // 最近一次 profile 快照回显的风格（供选项异步加载完成后回显）
+
+async function loadStyleOptions() {
+  const sel = $("style-select");
+  if (!sel) return;
+  try {
+    const r = await fetch("/api/templates");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    sel.innerHTML = "";
+    (data.templates || []).filter((t) => t.engine === "html").forEach((t) => {
+      const opt = document.createElement("option");
+      opt.value = t.name;
+      opt.textContent = "🖨 " + t.display_name;
+      opt.title = t.description || "";
+      sel.appendChild(opt);
+    });
+    sel.style.display = sel.options.length ? "" : "none";
+    applyStyleSelection(currentTemplate); // 选项就绪后补应用（快照可能先于本请求到达）
+  } catch (e) {
+    sel.style.display = "none"; // 列表不可达时隐藏控件，不影响其它功能
+  }
+}
+
+function applyStyleSelection(template) {
+  const sel = $("style-select");
+  if (!sel || !sel.options.length) return;
+  const v = template || "lushu";
+  const hit = Array.from(sel.options).some((o) => o.value === v);
+  sel.value = hit ? v : "lushu"; // 旧会话残留值（如 cartoon）不在列表 → 回显默认
+}
+
+$("style-select").addEventListener("change", () => {
+  const sel = $("style-select");
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "template", name: sel.value }));
+});
+loadStyleOptions();
 
 function now() {
   return new Date().toTimeString().slice(0, 8);
