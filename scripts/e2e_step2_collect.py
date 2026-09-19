@@ -42,8 +42,11 @@ async def main() -> None:
     print("\n=== ③ 检查黑板各分区 ===")
     p = s.bb.profile
     print("guide_digest 来源数:", len(p.guide_digest))
+    struct_rows = sum(1 for g in p.guide_digest if (g.spots or g.foods or g.routes or g.warnings))
+    print(f"guide_digest 结构化非空率: {struct_rows}/{len(p.guide_digest)}（收集质量核心指标）")
     for g in p.guide_digest:
         print("   -", g.source_name, "| spots:", g.spots[:4], "| ref:", g.reference_only)
+    print("cover_images:", len(p.cover_images), "| spot_notes:", len(p.spot_notes), "| food_notes:", len(p.food_notes))
     print("tickets:", len(p.tickets), "| 已勾选:", next((t.train_no for t in p.tickets if t.selected), None))
     for t in p.tickets[:5]:
         print(f"   - {t.train_no} {t.depart_time}→{t.arrive_time} ¥{t.price} score={t.score} sel={t.selected} ref={t.reference_only}")

@@ -38,6 +38,15 @@ def test_primary_success_no_failover():
     assert asyncio.run(client.create([_MSG()])).content == "第二次回复"
 
 
+def test_empty_content_retried_on_same_channel():
+    """思考型模型偶发只回推理不回正文（content 空串）：同通道立即重试一次，不触发主备切换
+    （2026-09-19 e2e 根因：结构化空回退/群聊消息清洗成占位均由此而来）。"""
+    primary = ReplayChatCompletionClient(["", "重试后的回复"])
+    client = _FallbackClient(primary, ReplayChatCompletionClient(["次级回复"]))
+    assert asyncio.run(client.create([_MSG()])).content == "重试后的回复"
+    assert client._on_primary  # 空 content 属同通道重试，不是主模型故障，不得触发切换
+
+
 def test_primary_failure_switches_to_secondary():
     primary = _FlakyClient("主模型回复", fail_times=999)
     client = _FallbackClient(primary, ReplayChatCompletionClient(["次级回复"]))

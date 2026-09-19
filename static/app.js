@@ -403,11 +403,11 @@ function flashAgent(name) {
 }
 
 /* ---------- Subagent 指示灯（2026-09-05）：黄=运行中 / 绿=完成 / 红=失败 ---------- */
-const SUB_PARENT = { guides: "Researcher", tickets: "BookingButler", hotels: "BookingButler", weather: "BookingButler", route: "BookingButler" };
+const SUB_PARENT = { guides: "Researcher", covers: "Researcher", foods_img: "Researcher", spots_img: "Researcher", tickets: "BookingButler", hotels: "BookingButler", weather: "BookingButler", route: "BookingButler" };
 const subStates = {}; // channel → "running" | "done" | "failed"
 
 function setSubLight(channel, state) {
-  if (!channel || !["guides", "tickets", "hotels", "weather", "route"].includes(channel)) {
+  if (!channel || !["guides", "covers", "foods_img", "spots_img", "tickets", "hotels", "weather", "route"].includes(channel)) {
     return; // 未知通道忽略（前向兼容：服务端新增通道前端不炸）
   }
   subStates[channel] = state;

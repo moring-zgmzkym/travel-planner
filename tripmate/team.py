@@ -29,7 +29,7 @@ from .mocks.data import kb_for_city
 from .models import (Draft, DraftDay, DraftFeedback, FinalDelivery, GuideDigestItem,
                      GuideExtras, HotelCandidate, ImageItem, PlanInput, TicketCandidate,
                      TravelProfile)
-from .digest import build_digest_notes, build_guide_extras
+from .digest import build_digest_notes, build_guide_extras, structure_guide_rows
 from .pdf_gen import build_pdf
 from .planning import PACE_SPOTS, analyze_impact, compute_budget, validate_draft
 from .status import AUDIT, StatusBus
@@ -261,7 +261,37 @@ def _sub_notify(bus: StatusBus, channel: str, label: str):
 
 
 def make_researcher_tools(ctx: TeamContext):
-    """信息收集 Agent：攻略搜索（start/collect/write 三段式）+ 图片搜索。"""
+    """信息收集 Agent：攻略/封面/美食图文多 worker 编排（start 提交 → finish 逐通道收割写黑板）+ 图片搜索。"""
+
+    _foods_submitted = {"done": False}   # 链式提交防重（自愈/降级路径可能二次进入 _guide_job 收尾段）
+
+    def _foods_from_rows(rows: list) -> list[str]:
+        """结构化行 → 去重美食清单（截 6 个；无 foods 则不提交美食图文任务）。"""
+        return sorted({f for r in rows for f in (r.get("foods") or []) if f})[:6]
+
+    async def _covers_job() -> dict:
+        prof: TravelProfile = ctx.bb.profile
+        city = prof.basic_info.destination or ""
+
+        async def _query() -> dict:
+            # 契约：run_channel_subagent 只认 dict 产出（_EXPECT_TYPE），list 必须包装
+            return {"covers": await search_city_covers(city)}
+
+        return await run_channel_subagent(
+            "covers", f"查询「{city}」的城市封面/背景图。调用工具即完成。",
+            _query, notify=_sub_notify(ctx.bus, "covers", "封面"))
+
+    def _foods_img_job(texts: list[str]):
+        """美食图文任务体：build_digest_notes 整体包装。spot_notes/food_notes 必须同生同灭——
+        护栏以二者配对为幂等条件（team._ensure_sections），只写其一会永久丢另一类笔记。"""
+
+        async def _run() -> dict:
+            prof: TravelProfile = ctx.bb.profile
+            return await build_digest_notes(prof.basic_info.destination or "", texts)
+
+        return run_channel_subagent(
+            "foods_img", "查询当地美食图文笔记（简介+配图）。调用工具即完成。",
+            _run, notify=_sub_notify(ctx.bus, "foods_img", "美食图"))
 
     async def _guide_job() -> dict:
         prof: TravelProfile = ctx.bb.profile
@@ -270,18 +300,28 @@ def make_researcher_tools(ctx: TeamContext):
         style = " ".join(prof.basic_info.style or [])
 
         async def _query() -> dict:
-            await ctx.bus.emit(AGENT_RES, f"攻略搜索中…（{dest}｜7 路专题并行：站点/美食/避坑/路线/景点）", "STATUS_COLLECT")
+            await ctx.bus.emit(AGENT_RES, f"攻略搜索中…（{dest}｜8 路专题并行：站点/美食/避坑/路线/景点/机位）", "STATUS_COLLECT")
             r = await search_guides(dest, month, style_hint=style)
+            # 结构化下沉在通道内完成（整理失败函数内原样回退，不影响降级链）
+            r["digest"] = await structure_guide_rows(r["digest"], dest)
             tag = "降级参考值" if r["mode"] == "mock" else "实时"
             await ctx.bus.emit(AGENT_RES, f"攻略搜索完成：{len(r['digest'])} 份来源（{tag}）", "STATUS_COLLECT")
             return r
 
-        return await run_channel_subagent(
+        r = await run_channel_subagent(
             "guides", f"查询目的地「{dest}」的旅行攻略（月份/主题：{month} {style}）。调用工具即完成。",
             _query, notify=_sub_notify(ctx.bus, "guides", "攻略"))
+        # 链式触发：攻略原文产出后立即并行开跑美食图文笔记（mock 行无原文 → 不提交，护栏语义不变）
+        rows = r.get("digest") or []
+        texts = [str(x.get("raw_answer") or "") for x in rows if x.get("raw_answer")]
+        if texts and _foods_from_rows(rows) and not _foods_submitted["done"]:
+            _foods_submitted["done"] = True
+            ctx.jobs.submit("foods_img", _foods_img_job(texts))
+        return r
 
     async def start_guide_search() -> str:
-        """启动攻略搜索任务（小红书/马蜂窝/百度三路并行）。无参数：画像从共享黑板读取。
+        """启动信息收集任务组：攻略（8 路专题）+ 城市封面图并行；美食图文笔记由攻略通道
+        结构化产出美食清单后链式提交。无参数：画像从共享黑板读取。
         必须真正调用本工具（不允许只回复文字），工具返回后再简短回复 SEARCH_STARTED。"""
         prof: TravelProfile = ctx.bb.profile
         dest = prof.basic_info.destination or ""
@@ -289,59 +329,123 @@ def make_researcher_tools(ctx: TeamContext):
             ctx.state.step = "MCP_START"
             AUDIT.thought(AGENT_RES, f"变更影响分析：攻略复用缓存（{len(prof.guide_digest)} 份来源），不重搜")
             await _sub_notify(ctx.bus, "guides", "攻略")("done")
+            # 封面图只受目的地影响：攻略复用 ⇒ 目的地未变 ⇒ 封面一并复用（补交 done 灯防灰灯）
+            await _sub_notify(ctx.bus, "covers", "封面")("done")
+            if ctx.reuse.get("foods_img", True):
+                # 美食图文未受变更影响：笔记/配图沿用黑板既有分区
+                await _sub_notify(ctx.bus, "foods_img", "美食图")("done")
+            else:
+                # 复用路径（S4）：餐饮禁忌类变更只重提炼笔记，不重搜攻略——语料取黑板现有攻略
+                texts = [g.raw_answer for g in prof.guide_digest if g.raw_answer]
+                if texts:
+                    ctx.jobs.submit("foods_img", _foods_img_job(texts))
+                    AUDIT.thought(AGENT_RES, "美食图文笔记受变更影响：用现有攻略语料重新提炼")
             return _ok(status="reused", note="攻略复用缓存（未受变更影响）", sources=len(prof.guide_digest))
         ctx.state.step = "MCP_START"
         ctx.jobs.submit("guides", _guide_job())
+        ctx.jobs.submit("covers", _covers_job())
         AUDIT.action(AGENT_RES, "start_guide_search", f"destination={dest}")
         return _ok(status="submitted", destination=dest)
 
+    async def _harvest_covers() -> int:
+        """收割封面图通道并写 cover_images 分区。0 张不写：护栏以 `not cover_images` 为
+        兜底条件，写入空列表会触发同阶段二次查询。"""
+        if not ctx.jobs.has("covers"):
+            return 0
+        try:
+            c = await ctx.jobs.collect("covers")
+            ctx.check_run_budget()
+        except TokenBudgetExceeded:
+            raise  # 熔断不得被降级链吞掉（否则要拖到下一条消息才生效）
+        except Exception as exc:  # noqa: BLE001 — 封面通道失败静默降级，护栏照旧兜底
+            AUDIT.observation(AGENT_RES, f"封面通道收割失败（跳过）：{type(exc).__name__}: {exc}")
+            return 0
+        covers = c.get("covers") or []
+        if not covers:
+            return 0
+        await ctx.bb.write("cover_images", covers, "researcher", "封面城市宣传图检索")
+        AUDIT.observation(AGENT_RES, f"cover_images 写入 {len(covers)} 张")
+        return len(covers)
+
+    async def _harvest_foods() -> int:
+        """收割美食图文通道并**配对**写入 spot_notes + food_notes 两分区（护栏以二者配对为
+        幂等条件，只写其一会永久丢另一类笔记）。"""
+        if not ctx.jobs.has("foods_img"):
+            return 0
+        try:
+            n = await ctx.jobs.collect("foods_img")
+            ctx.check_run_budget()
+        except TokenBudgetExceeded:
+            raise  # 熔断不得被降级链吞掉（否则要拖到下一条消息才生效）
+        except Exception as exc:  # noqa: BLE001 — 笔记通道失败静默降级，护栏照旧兜底
+            AUDIT.observation(AGENT_RES, f"美食图文通道收割失败（跳过）：{type(exc).__name__}: {exc}")
+            return 0
+        if not (n.get("spots") or n.get("foods")):
+            return 0
+        await ctx.bb.write("spot_notes", n["spots"], "researcher", "攻略笔记提炼：景点简介/游玩活动")
+        await ctx.bb.write("food_notes", n["foods"], "researcher", "攻略笔记提炼：美食简介")
+        AUDIT.observation(AGENT_RES, f"攻略笔记提炼：景点 {len(n['spots'])} / 美食 {len(n['foods'])}")
+        return len(n["foods"])
+
     async def finish_guide_search(digest_json: str = "") -> str:
-        """收割攻略结果并写入共享黑板 guide_digest 分区（一步完成，digest_json 可留空）。
-        digest_json 留空：系统直接采用原始收集结果（已是结构化四元+来源，无需改写）；
-        也可传入整理裁剪后的 JSON 数组（保留 source_name/source_url/fetched_at/spots/foods/routes/warnings 字段）。
-        写入成功后回复以「SEARCH_RESULT」开头。"""
+        """收割信息收集任务组并写入共享黑板（攻略/封面/美食图文逐通道收割，单通道失败只
+        降级该通道、其余照常）。digest_json 可留空：worker 已在通道内完成结构化整理
+        （参数与容错解析保留，向后兼容）。写入成功后回复以「SEARCH_RESULT」开头。"""
         if ctx.reuse.get("guides") and ctx.bb.profile.guide_digest:
             ctx.state.step = "MCP_COLLECT"
+            # S4 复用路径：美食图文按自身复用标记可能已从黑板语料重新提交，仍需收割
+            foods = await _harvest_foods()
             return _ok(status="reused", note="攻略复用缓存，无需结构化",
-                       sources=len(ctx.bb.profile.guide_digest))
+                       sources=len(ctx.bb.profile.guide_digest), food_notes=foods)
         if not ctx.jobs.has("guides"):
             AUDIT.thought(AGENT_RES, "finish 自愈：start 工具未执行，自动提交搜索任务")
             ctx.jobs.submit("guides", _guide_job())
+        guides_error = ""
+        rows: list[dict] = []
         try:
             r = await ctx.jobs.collect("guides")
             ctx.check_run_budget()  # subagent 的 LLM 消耗不经群聊逐消息检查，收割点补检
+            rows = r.get("digest") or []
         except TokenBudgetExceeded:
             raise  # 熔断不得被降级链吞掉（否则要拖到下一条消息才生效）
-        except Exception as exc:  # noqa: BLE001 — 收割失败降级，攻略分区交由护栏补齐（2026-09-04 加固）
+        except Exception as exc:  # noqa: BLE001 — 攻略通道收割失败降级，攻略分区交由护栏补齐（2026-09-04 加固）
+            guides_error = f"攻略搜索任务超时/失败（{type(exc).__name__}），攻略分区将由系统护栏补齐"
             AUDIT.observation(AGENT_RES, f"攻略任务收割失败：{type(exc).__name__}: {exc}")
-            ctx.state.step = "MCP_COLLECT"
-            return _ok(status="error", error=f"攻略搜索任务超时/失败（{type(exc).__name__}），攻略分区将由系统护栏补齐")
-        rows = r["digest"]
-        if digest_json and digest_json.strip():
-            try:
-                parsed = json.loads(digest_json)
-                if isinstance(parsed, list) and parsed:
-                    rows = parsed
-            except json.JSONDecodeError:
-                AUDIT.observation(AGENT_RES, "digest_json 解析失败，回退原始收集结果")
         items = []
-        for d in rows:
-            try:
-                items.append(GuideDigestItem(**d))
-            except Exception:
-                continue
-        if not items:
-            ctx.state.step = "MCP_COLLECT"
-            return _ok(status="error", error="没有可用的攻略条目（原始结果也为空），攻略分区将由系统护栏补齐")
-        await ctx.bb.write("guide_digest", items, "researcher", "攻略搜索结构化摘要")
+        if rows:
+            if digest_json and digest_json.strip():
+                try:
+                    parsed = json.loads(digest_json)
+                    if isinstance(parsed, list) and parsed:
+                        rows = parsed
+                except json.JSONDecodeError:
+                    AUDIT.observation(AGENT_RES, "digest_json 解析失败，回退原始收集结果")
+            for d in rows:
+                try:
+                    items.append(GuideDigestItem(**d))
+                except Exception:
+                    continue
+        sources = len(items)
+        spots: list[str] = []
+        if items:
+            await ctx.bb.write("guide_digest", items, "researcher", "攻略搜索结构化摘要")
+            spots = sorted({s for g in items for s in g.spots})[:10]
+            AUDIT.observation(AGENT_RES, f"guide_digest 写入 {len(items)} 条")
+        covers_written = await _harvest_covers()
+        foods_written = await _harvest_foods()
         # 攻略收割完成 → 交棒 MCP 收割（§3.4 交错协议：双方收割完才汇总）。
         # 此前直跳 PROC_SUMMARIZE 会导致 BookingButler 永远轮不到收割回合——选择器唯一能
         # 点名它的路径是"Researcher 空转"兜底，Researcher 越成功越收不到订单数据（2026-08-31 e2e 实测死锁）。
         ctx.state.step = "MCP_COLLECT"
-        spots = sorted({s for g in items for s in g.spots})[:10]
-        AUDIT.observation(AGENT_RES, f"guide_digest 写入 {len(items)} 条")
-        return _ok(status="written", sources=len(items), spots=spots,
-                   reference_only=any(g.reference_only for g in items))
+        if guides_error:
+            return _ok(status="error", error=guides_error,
+                       covers=covers_written, food_notes=foods_written)
+        if not items:
+            return _ok(status="error", error="没有可用的攻略条目（原始结果也为空），攻略分区将由系统护栏补齐",
+                       covers=covers_written, food_notes=foods_written)
+        return _ok(status="written", sources=sources, spots=spots,
+                   reference_only=any(g.reference_only for g in items),
+                   covers=covers_written, food_notes=foods_written)
 
     async def search_spot_images(spots: str) -> str:
         """搜索景点配图（每景点 1-2 张，附来源），写入共享黑板 images 分区。
@@ -357,7 +461,14 @@ def make_researcher_tools(ctx: TeamContext):
         if not names:
             return _ok(status="error", error="没有可搜索的景点清单（spots 参数为空且黑板无草稿）")
         await ctx.bus.emit(AGENT_RES, f"景点配图搜索中…（{len(names)} 个景点）", "STATUS_IMAGES")
-        r = await search_images(names, city=prof.basic_info.destination or "")
+        city = prof.basic_info.destination or ""
+
+        async def _query() -> dict:
+            return await search_images(names, city=city)
+
+        r = await run_channel_subagent(
+            "spots_img", f"搜索 {len(names)} 个景点的配图。调用工具即完成。",
+            _query, notify=_sub_notify(ctx.bus, "spots_img", "景点配图"))
         items = [ImageItem(spot=i["spot"], path=i.get("path", ""), source=i["source"], note=r.get("notice", ""))
                  for i in r["items"]]
         await ctx.bb.write("images", items, "researcher", "景点配图（" + r["mode"] + "）")
@@ -1022,11 +1133,15 @@ class TeamRunner:
 
     async def _run_phase(self, phase: str, changed_fields: list[str] | None = None) -> None:
         # 变更影响分析 → 通道复用开关（§5.3：只重跑受影响环节）
-        reuse = {k: True for k in ("guides", "tickets", "hotels", "weather")}
+        reuse = {k: True for k in ("guides", "covers", "foods_img", "tickets", "hotels", "weather")}
         if changed_fields:
             affected = analyze_impact(changed_fields)
             if "guides" in affected:
                 reuse["guides"] = False
+            if "covers" in affected:
+                reuse["covers"] = False
+            if "foods_img" in affected:
+                reuse["foods_img"] = False
             if "tickets" in affected:
                 reuse["tickets"] = False
             if "hotels" in affected:
@@ -1403,11 +1518,23 @@ class TeamRunner:
                 elif isinstance(msg, BaseAgentEvent):
                     pass
                 elif isinstance(msg, BaseChatMessage):
-                    last_text = msg.to_text()
+                    raw_text = msg.to_text()
                     if msg.source != "user":
                         from .chatter import clean_reply
-                        last_text = clean_reply(last_text, fallback="（已处理）")
-                        texts.append(last_text)
+                        last_text = clean_reply(raw_text, fallback="")
+                        if last_text:
+                            texts.append(last_text)
+                        else:
+                            # 纯标记消息（清洗后为空）：时间线给占位，但原文保留进护栏文本库——
+                            # 文本化工具调用的 draft_json 参数恰在此类消息里，清洗会让
+                            # _recover_draft_from_texts 无料可提取（2026-09-19 e2e：检查点重跑
+                            # Planner 两次文本化 submit_draft → 8.5 分钟重跑交付旧草稿）。
+                            # 恢复路径自带 validate_draft 校验，写入安全。
+                            if raw_text.strip():
+                                texts.append(raw_text)
+                                AUDIT.observation(msg.source, f"消息清洗后为空（原始 {len(raw_text)} 字符，"
+                                                              "疑似文本化工具调用），原文已留护栏文本库")
+                            last_text = "（已处理）"
                         await self.bus.emit(msg.source, _clip_msg(last_text), "AGENT_MESSAGE")
                         AUDIT.output(msg.source, last_text)
         finally:

@@ -101,7 +101,7 @@ def test_search_guides_tolerates_malformed_route(monkeypatch):
         r = await search_guides("西安")
         assert r["mode"] == "real"
         names = [d["source_name"] for d in r["digest"]]
-        assert len(r["digest"]) == 4, f"3 路畸形应被跳过、4 路正常保留，实际 {names}"
+        assert len(r["digest"]) == 5, f"3 路畸形应被跳过、5 路正常保留（8 路扩容后），实际 {names}"
         assert not any("马蜂窝" in n or "美食" in n or "避坑" in n for n in names)
 
     asyncio.run(main())

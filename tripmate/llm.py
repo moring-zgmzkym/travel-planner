@@ -160,6 +160,19 @@ class _FallbackClient(ChatCompletionClient, Component[_FallbackConfig]):
                         extra_create_args=extra_create_args,
                         cancellation_token=cancellation_token,
                     )
+                    if isinstance(result.content, str) and not result.content.strip():
+                        # 思考型模型偶发只回推理不回正文（content 为空串）——2026-09-19 e2e 实测：
+                        # 攻略结构化空回退、锦囊提炼空、群聊消息被清洗成占位，均此根因。
+                        # 同通道立即重试一次；仍空则原样返回，由上层既有降级链兜底。
+                        logger.warning("%s 返回空 content，同通道立即重试", self._label(idx))
+                        result = await self._client(idx).create(
+                            messages,
+                            tools=tools,
+                            tool_choice=tool_choice,
+                            json_output=json_output,
+                            extra_create_args=extra_create_args,
+                            cancellation_token=cancellation_token,
+                        )
                     self._note_success(idx)
                     return result
                 except Exception as exc:  # noqa: BLE001 — 主备逐个尝试，全部失败才上抛

@@ -37,7 +37,7 @@ _PREFERRED_HOSTS = ("chinadaily.com", "gmw.cn", "jiemian.com", "people.com.cn", 
 
 
 async def _tavily(client: httpx.AsyncClient, query: str, search_depth: str = "basic", max_results: int = 5) -> dict:
-    """Tavily 文本搜索。客户端由调用方传入（共享连接池，7 路查询不再各开 7 个客户端）。"""
+    """Tavily 文本搜索。客户端由调用方传入（共享连接池，8 路查询不再各开 8 个客户端）。"""
 
     async def _call() -> dict:
         r = await client.post(
@@ -62,7 +62,7 @@ def _degraded_notice() -> str:
 
 
 def _guide_queries(destination: str, month_hint: str = "", style_hint: str = "") -> list[tuple[str, str]]:
-    """攻略检索查询构造（纯函数，便于单测）：站点 3 路 + 主题 4 路。"""
+    """攻略检索查询构造（纯函数，便于单测）：站点 3 路 + 主题 5 路。"""
     dest = destination or ""
     topic = f"{dest} {style_hint}".strip() if style_hint else dest
     return [
@@ -73,13 +73,14 @@ def _guide_queries(destination: str, month_hint: str = "", style_hint: str = "")
         (f"{dest} 旅游 避坑 注意事项", "避坑专题"),
         (f"{dest} 行程路线 动线 {month_hint}".strip(), "路线专题"),
         (f"{topic} 必去景点 推荐", "景点专题"),
+        (f"{dest} 出片 拍照机位 机位攻略", "机位专题"),
     ]
 
 
 async def search_guides(destination: str, month_hint: str = "", style_hint: str = "") -> dict:
-    """多类查询（§4.3）：站点限定 + 主题专题共 7 路并行（2026-08-30 扩容：攻略信息量不足以
-    支撑贴合用户需求的行程，增加美食/避坑/路线/景点专题路），每路 top8 去重合并。
-    7 路共享一个 httpx 客户端（连接复用）+ 信号量限 3 并发（平滑 Tavily 突发，与图片链路一致）。"""
+    """多类查询（§4.3）：站点限定 + 主题专题共 8 路并行（2026-09-19 扩容：新增出片机位专题路，
+    服务《出片之旅》路书配图与行程取向），每路 top8 去重合并。
+    8 路共享一个 httpx 客户端（连接复用）+ 信号量限 3 并发（平滑 Tavily 突发，与图片链路一致）。"""
     queries = _guide_queries(destination or "", month_hint, style_hint)
     if SearchConfig.TAVILY_API_KEY:
         sem = asyncio.Semaphore(3)
@@ -153,37 +154,90 @@ async def search_images(spots: list[str], per_spot: int = 2, city: str = "") -> 
     return {"mode": "real", "items": items}
 
 
+async def _commons_covers(client: httpx.AsyncClient, city: str, count: int) -> list[str]:
+    """Commons 封面兜底（2026-09-19）：Tavily include_images 对城市封面查询基本只返回图库站
+    缩略预览（实测成都 10 候选全部 350-900px，被 1200px 门槛全拒），Commons 原始分辨率正图
+    是唯一稳定正图源。取原图 url（不传 iiurlwidth），沿用 ≥20000B / ≥1200px / 横版门槛。"""
+    from ..config import IMAGE_DIR
+
+    api = "https://commons.wikimedia.org/w/api.php"
+    for gsrsearch in (f"{city} skyline", city):
+        params = {
+            "action": "query", "format": "json", "generator": "search",
+            "gsrsearch": f"filetype:bitmap {gsrsearch}", "gsrlimit": "10", "gsrnamespace": "6",
+            "prop": "imageinfo", "iiprop": "url|mime|size",
+        }
+        try:
+            r = await client.get(api, params=params)
+            r.raise_for_status()
+            pages = (r.json().get("query") or {}).get("pages") or {}
+        except Exception as exc:  # noqa: BLE001 — 单源失败记日志后降级
+            logger.warning("Commons 封面检索「%s」失败（%s: %s）", gsrsearch, type(exc).__name__, exc)
+            continue
+        out: list[str] = []
+        for p in sorted(pages.values(), key=lambda x: x.get("index", 99)):
+            info = (p.get("imageinfo") or [{}])[0]
+            if info.get("mime") not in ("image/jpeg", "image/png"):
+                continue
+            if info.get("width", 0) < 1200 or info.get("width", 0) <= info.get("height", 0):
+                continue  # 门槛前置：不够宽/竖图不下载
+            url = info.get("url")
+            if not url:
+                continue
+            local = await _download_image(client, f"{city}封面", url)
+            if not local:
+                continue
+            try:
+                from PIL import Image as PILImage
+                with PILImage.open(local) as im:
+                    if im.size[0] < 1200 or im.size[0] <= im.size[1]:
+                        continue
+                    path = IMAGE_DIR / ("citycover_" + hashlib.md5(
+                        f"{city}|{url}".encode()).hexdigest()[:16] + ".jpg")
+                    im.convert("RGB").save(path, quality=90)
+                out.append(str(path))
+                if len(out) >= count:
+                    return out
+            except Exception:  # noqa: BLE001 — 单张落盘失败换下一张
+                continue
+        if out:
+            return out
+    return []
+
+
 async def search_city_covers(city: str, count: int = 3) -> list[str]:
     """城市宣传图（PDF 封面背景专用，2026-09-03）：独立查询词与内页素材图区分，
-    PIL 门槛（宽 ≥1200 且横版）逐张验证，`citycover_` 前缀独立落盘；失败返回空列表。"""
+    PIL 门槛（宽 ≥1200 且横版）逐张验证，`citycover_` 前缀独立落盘；失败返回空列表。
+    2026-09-19 增补 Commons 兜底：Tavily 图源对封面查询命中图库缩略图，门槛全拒。"""
     import io
 
     from PIL import Image as PILImage
 
     from ..config import IMAGE_DIR
-    if not city or not SearchConfig.TAVILY_API_KEY:
-        return []
+    if not city:
+        return []  # Commons 兜底无需 Key：mock 模式（无 Tavily Key）也能出真封面（2026-09-19）
     queries = [f"{city} 地标 城市风光 宣传照", f"{city} 城市天际线 摄影"]
     urls: list[str] = []
     seen: set[str] = set()
     async with httpx.AsyncClient(timeout=_IMG_TIMEOUT_S, headers=_IMG_HEADERS,
                                  follow_redirects=True) as client:
-        for q in queries:
-            try:
-                r = await client.post(TAVILY_URL, json={
-                    "api_key": SearchConfig.TAVILY_API_KEY,
-                    "query": q, "search_depth": "basic",
-                    "max_results": 6, "include_images": True,
-                })
-                r.raise_for_status()
-                imgs = r.json().get("images") or []
-            except Exception as exc:  # noqa: BLE001 — 单查询失败继续另一查询
-                logger.warning("封面图检索「%s」失败（%s: %s）", q, type(exc).__name__, exc)
-                continue
-            for u in (x.get("url") if isinstance(x, dict) else x for x in imgs):
-                if u and u not in seen and not any(h in urlsplit(u).netloc for h in _WATERMARK_HOSTS):
-                    seen.add(u)
-                    urls.append(u)
+        if SearchConfig.TAVILY_API_KEY:
+            for q in queries:
+                try:
+                    r = await client.post(TAVILY_URL, json={
+                        "api_key": SearchConfig.TAVILY_API_KEY,
+                        "query": q, "search_depth": "basic",
+                        "max_results": 6, "include_images": True,
+                    })
+                    r.raise_for_status()
+                    imgs = r.json().get("images") or []
+                except Exception as exc:  # noqa: BLE001 — 单查询失败继续另一查询
+                    logger.warning("封面图检索「%s」失败（%s: %s）", q, type(exc).__name__, exc)
+                    continue
+                for u in (x.get("url") if isinstance(x, dict) else x for x in imgs):
+                    if u and u not in seen and not any(h in urlsplit(u).netloc for h in _WATERMARK_HOSTS):
+                        seen.add(u)
+                        urls.append(u)
         out: list[str] = []
         for url in urls[:count + 6]:
             try:
@@ -204,6 +258,9 @@ async def search_city_covers(city: str, count: int = 3) -> list[str]:
                     break
             except Exception:  # noqa: BLE001 — 单候选失败换下一个
                 continue
+        if len(out) < count:
+            # Tavily 图源对封面查询命中图库缩略图（2026-09-19 实测成都 0 张合格）→ Commons 正图兜底
+            out += await _commons_covers(client, city, count - len(out))
     logger.info("封面宣传图检索「%s」：%d 张合格候选", city, len(out))
     return out
 
@@ -231,7 +288,8 @@ async def _tavily_images(client: httpx.AsyncClient, spot: str, per_spot: int, ci
     候选合并去重后按「权威媒体/官方优先」稳定排序；部分图链防盗链/失效，多备几个。"""
     if not SearchConfig.TAVILY_API_KEY:
         return []
-    queries = [f"{spot} {city} 实景".strip(), f"{spot} 景区 摄影"]
+    # 双查询：A 实景保底 + B 出片机位增强（《出片之旅》路书取向，2026-09-19）；B 无候选不影响 A 填充
+    queries = [f"{spot} {city} 实景".strip(), f"{spot} 出片 机位 摄影"]
     urls: list[str] = []
     seen: set[str] = set()
     for q in queries:

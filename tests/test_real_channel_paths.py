@@ -26,7 +26,7 @@ class _FakeResponse:
 
 
 def test_search_guides_real_path_single_client_and_isolation(monkeypatch):
-    """真实通道：7 路全部发出、共享 1 个客户端、单路故障只降级该路。"""
+    """真实通道：8 路全部发出、共享 1 个客户端、单路故障只降级该路。"""
     monkeypatch.setattr(SearchConfig, "TAVILY_API_KEY", "test-key")
     monkeypatch.setattr(SearchConfig, "RETRY_DELAY_S", 0.001)  # 故障路重试退避不实睡
     seen_queries: list[str] = []
@@ -58,9 +58,9 @@ def test_search_guides_real_path_single_client_and_isolation(monkeypatch):
 
     r = asyncio.run(main())
     assert r["mode"] == "real"
-    assert len(set(seen_queries)) == 7   # 7 路全部发出（故障路含重试共 3 次提交）
-    assert instances["n"] == 1           # 7 路共享 1 个客户端（连接复用锁定）
-    assert len(r["digest"]) == 6         # 故障路降级跳过，其余 6 路合并
+    assert len(set(seen_queries)) == 8   # 8 路全部发出（故障路含重试共 3 次提交）
+    assert instances["n"] == 1           # 8 路共享 1 个客户端（连接复用锁定）
+    assert len(r["digest"]) == 7         # 故障路降级跳过，其余 7 路合并
     assert all(d["reference_only"] is False for d in r["digest"])
 
 

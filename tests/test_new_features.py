@@ -6,21 +6,24 @@ from tripmate.tools.search import _host_rank, _guide_queries
 from tripmate.gateway.app import _session_title
 
 
-def test_guide_queries_seven_routes_with_style():
-    """攻略 7 路扩容：站点 3 路 + 主题 4 路；style 拼入景点专题。"""
+def test_guide_queries_eight_routes_with_style():
+    """攻略 8 路扩容：站点 3 路 + 主题 5 路；style 拼入景点专题；新增出片机位专题。"""
     qs = _guide_queries("成都", "十月", "休闲 美食")
     names = [n for _, n in qs]
-    assert len(qs) == 7
+    assert len(qs) == 8
     assert names[:3] == ["小红书检索", "马蜂窝检索", "全网检索"]
     assert "美食专题" in names and "避坑专题" in names and "路线专题" in names and "景点专题" in names
+    assert "机位专题" in names
     spot_q = {n: q for q, n in qs}["景点专题"]
     assert "成都" in spot_q and "休闲 美食" in spot_q
+    photo_q = {n: q for q, n in qs}["机位专题"]
+    assert "成都" in photo_q and "机位" in photo_q
 
 
 def test_guide_queries_without_optional_hints():
     """月份/风格缺省时查询仍完整构造（占位符不残留 None）。"""
     qs = _guide_queries("汉中", "", "")
-    assert len(qs) == 7
+    assert len(qs) == 8
     for q, _ in qs:
         assert "None" not in q and "  " not in q.strip()
 

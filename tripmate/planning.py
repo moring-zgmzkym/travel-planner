@@ -14,7 +14,7 @@ FOOD_FALLBACK = 120   # 未收录城市餐饮日均值
 
 # 字段 → 受影响环节（§5.3 变更影响分析规则）
 FIELD_IMPACT: dict[str, set[str]] = {
-    "destination": {"guides", "tickets", "hotels", "weather", "itinerary"},   # 全量重跑
+    "destination": {"guides", "covers", "foods_img", "tickets", "hotels", "weather", "itinerary"},   # 全量重跑
     "origin": {"tickets", "itinerary"},
     "days": {"tickets", "hotels", "weather", "itinerary"},                    # 天数→晚数/日期全变（此前缺失：改天数不触发任何重查）
     "travel_dates": {"tickets", "hotels", "weather", "itinerary"},            # 车票+酒店+天气重查，攻略复用
@@ -28,7 +28,7 @@ FIELD_IMPACT: dict[str, set[str]] = {
     "hotel.price_range": {"hotels"},
     "hotel.min_star": {"hotels"},
     "must_visit": {"itinerary"},
-    "food_restrictions": {"itinerary"},
+    "food_restrictions": {"foods_img", "itinerary"},                          # 美食图文笔记重提炼
     "pace": {"itinerary"},
     "special_needs": {"itinerary"},
 }

@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import re
 from urllib.parse import urlsplit
 
@@ -23,9 +24,20 @@ from .llm import get_model_client
 from .models import AlarmItem, DayTheme, FoodNote, GuideExtras, SpotNote, TravelProfile
 from .tools.search import _IMG_HEADERS, _WATERMARK_HOSTS
 
+logger = logging.getLogger("tripmate.digest")
+
 _LLM_TIMEOUT_S = 45.0    # 提炼单次上限：collect 收尾同步等待，超时即放弃走回退
+_STRUCT_TIMEOUT_S = 300.0  # 攻略结构化单次上限：晚间免费档拥堵实测 150s 仍不够（2026-09-19，与备通道 300s 同理——
+                           # 拥堵窗口砍死本可完成的调用）；跑在 JobBoard 900s 预算内，放宽安全
+_EXTRAS_TIMEOUT_S = 150.0  # 路书锦囊上限：45s 实测被吃满截断（2026-09-19 e2e：提炼耗时 46s → 闹钟/主题全空）；
+                           # 在群聊轮内执行，取 150s 平衡拥堵与定稿时延
 _IMG_TIMEOUT_S = 12.0
 _MAX_CORPUS_CHARS = 6000
+
+# 工具型 JSON 提炼统一降思考力度（2026-09-19 e2e 根因：glm-5.3-flash 思考 token 计入
+# max_tokens=8192，重提示词下推理耗尽预算 → content 为空/结构化全空/群聊消息被清洗成占位；
+# effort low 实测 8/8 行正常产出，且不再出现空 content）。规划类 Agent 不套用，保留深度思考。
+_LLM_JSON_ARGS = {"extra_create_args": {"extra_body": {"thinking": {"type": "enabled", "effort": "low"}}}}
 
 _PROMPT = """你是旅行攻略编辑。下面是关于「{city}」的攻略搜索摘要原文（可能不完整）。
 请从中提炼：
@@ -58,7 +70,8 @@ async def extract_digest_notes(city: str, texts: list[str]) -> dict:
     prompt = _PROMPT.format(city=city or "目的地", corpus=corpus)
 
     async def _call() -> str:
-        result = await get_model_client().create([UserMessage(content=prompt, source="digest")])
+        result = await get_model_client().create([UserMessage(content=prompt, source="digest")],
+                                        **_LLM_JSON_ARGS)
         return result.content if isinstance(result.content, str) else ""
 
     try:
@@ -87,6 +100,105 @@ async def extract_digest_notes(city: str, texts: list[str]) -> dict:
         foods.append(FoodNote(name=name[:30],
                               intro=str(item.get("intro") or "").strip()[:50]))
     return {"spots": spots, "foods": foods}
+
+
+_STRUCT_PROMPT = """你是旅行攻略编辑。下面是关于「{city}」的攻略搜索摘要（编号条目，每条含来源、标题与原文片段）。
+请逐条提炼结构化信息，只输出 JSON：{{"rows": [条目1, 条目2, ...]}}，rows 与输入条目一一对应（顺序、条数一致），
+每条格式：{{"spots": ["具体景点名"], "foods": ["具体美食名"], "routes": ["完整动线：A→B→C"], "warnings": ["避坑提示"]}}
+硬约束：spots/foods 名称一律用中文原文，不得中英混排或翻译，不得编造、不得保留整句标题；
+routes/warnings 必须来自原文；原文没有的信息一律给空数组。不要输出 JSON 以外的任何文字。
+
+攻略原文：
+{corpus}"""
+
+_STRUCT_ROW_CHARS = 1200   # 每路原文片段截断：8 路 ≈ 10K 字符语料，输出 8 条结构化 ≈ 2-3K tokens
+
+
+def _bigram_hits(name: str, text: str) -> bool:
+    """名称软校验：与原文双向子串，或名称任一 2-gram 出现在原文中（容忍"熊猫基地"式合法简称，
+    同时挡住与原文零字符重叠的编造项）。"""
+    if not name or not text:
+        return False
+    if name in text:
+        return True
+    return any(name[i:i + 2] in text for i in range(max(len(name) - 1, 1)))
+
+
+def _parse_rows_array(text: str) -> list | None:
+    """容忍式解析 rows 数组：优先 {"rows": [...]}；失败则剥 markdown 围栏后尝试裸 JSON 数组。"""
+    data = _parse_json_block(text).get("rows")
+    if isinstance(data, list):
+        return data
+    stripped = (text or "").strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped).strip()
+    if stripped.startswith("["):
+        try:
+            arr = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(arr, list):
+            return arr
+    return None
+
+
+async def structure_guide_rows(rows: list[dict], city: str) -> list[dict]:
+    """攻略原始行结构化（下沉在搜索通道内完成，Researcher 不再在群聊里整理）。
+
+    背景（2026-09-19 根因）：原设计要求 Researcher 把 raw_answer/标题整理为 digest_json 提交，
+    但原始内容只在 subagent 通道内部流转、从不进入其模型上下文——指令等于要求模型整理一份
+    它从未见过的数据，结构化字段因此常年为空、由护栏重复提炼。
+    全链路防御：超时/网络/解析/校验任何失败原样返回 rows，绝不向上抛（否则会被
+    run_channel_subagent 的重试+降级链放大成多次查询）；mock 通道行已自带结构化四元，直接跳过。
+    所有回退路径记 WARNING（2026-09-19 e2e 教训：静默回退曾让结构化失败完全不可见）。
+    """
+    texts = []
+    for i, d in enumerate(rows, 1):
+        answer = str(d.get("raw_answer") or "").strip()
+        titles = "；".join(t for t in (d.get("raw_titles") or []) if t)
+        if not answer and not titles:
+            continue
+        texts.append(f"【{i}】{d.get('source_name', '')}\n标题：{titles}\n原文：{answer[:_STRUCT_ROW_CHARS]}")
+    corpus = "\n".join(texts)
+    if not corpus:
+        logger.info("攻略结构化跳过：无原文语料（mock 通道行已自带结构化四元）")
+        return rows
+    prompt = _STRUCT_PROMPT.format(city=city or "目的地", corpus=corpus[:12000])
+
+    async def _call() -> str:
+        result = await get_model_client().create([UserMessage(content=prompt, source="digest")],
+                                        **_LLM_JSON_ARGS)
+        return result.content if isinstance(result.content, str) else ""
+
+    try:
+        text = await asyncio.wait_for(_call(), timeout=_STRUCT_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — 统一容错边界：整理失败原样回退，调用方与降级链零感知
+        logger.warning("攻略结构化 LLM 调用失败（%s: %s），回退原始行", type(exc).__name__, exc)
+        return rows
+    data = _parse_rows_array(text)
+    if not isinstance(data, list) or not data:
+        logger.warning("攻略结构化解析失败（未取得 rows 数组，输出前 120 字符：%r），回退原始行",
+                       (text or "")[:120])
+        return rows
+
+    out = [dict(d) for d in rows]
+    for row, item in zip(out, data):
+        if not isinstance(item, dict):
+            continue
+        raw_text = " ".join(filter(None, (str(row.get("raw_answer") or ""),
+                                          " ".join(row.get("raw_titles") or []))))
+        for key, cap, n_max in (("spots", 30, 8), ("foods", 30, 6),
+                                ("routes", 100, 3), ("warnings", 80, 5)):
+            row[key] = [v for v in (str(x).strip()[:cap] for x in (item.get(key) or [])[:n_max])
+                        if v and _bigram_hits(v, raw_text)]
+    # 全部条目均未产出任何结构化字段（如解析到无关 JSON）：视为未产出，原样回退
+    if not any(row.get(k) for row in out for k in ("spots", "foods", "routes", "warnings")):
+        logger.warning("攻略结构化校验后全空（软校验过滤了全部条目），回退原始行")
+        return rows
+    filled = sum(1 for row in out if any(row.get(k) for k in ("spots", "foods", "routes", "warnings")))
+    logger.info("攻略结构化完成：%d/%d 行产出结构化字段", filled, len(out))
+    return out
 
 
 async def food_image(client: httpx.AsyncClient, name: str, city: str) -> str:
@@ -200,12 +312,14 @@ async def build_guide_extras(profile: TravelProfile) -> GuideExtras:
                                    days=basic.days or "-", corpus=corpus)
 
     async def _call() -> str:
-        result = await get_model_client().create([UserMessage(content=prompt, source="digest")])
+        result = await get_model_client().create([UserMessage(content=prompt, source="digest")],
+                                        **_LLM_JSON_ARGS)
         return result.content if isinstance(result.content, str) else ""
 
     try:
-        text = await asyncio.wait_for(_call(), timeout=_LLM_TIMEOUT_S)
-    except Exception:  # noqa: BLE001 — 统一容错边界：提炼失败留空走回退
+        text = await asyncio.wait_for(_call(), timeout=_EXTRAS_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — 统一容错边界：提炼失败留空走回退
+        logger.warning("路书锦囊提炼失败（%s: %s），PDF 走通用回退", type(exc).__name__, exc)
         return GuideExtras()
 
     data = _parse_json_block(text)

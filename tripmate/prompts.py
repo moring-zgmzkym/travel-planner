@@ -101,11 +101,8 @@ RESEARCHER_PROMPT = """你是旅行规划团队的信息收集 Agent（Researche
 第 1 步：收到 TASK_BROADCAST 后的首次发言——调用 start_guide_search，然后简短回复「SEARCH_STARTED」。
 第 2 步：你获得的**下一次发言权就是点名**（无需等待任何显式点名标记或他人的后续消息）——
        调用 finish_guide_search：
-       - 模拟通道（返回标注"降级参考值"）：digest_json 参数留空，系统直接采用原始结构化结果；
-       - 真实通道（返回含 raw_answer/raw_titles 原始字段）：必须把原始内容整理为结构化 JSON 数组作为
-         digest_json 提交，每条含 {"source_name","source_url","fetched_at","spots","foods","routes",
-         "warnings","reference_only":false}——spot 必须是具体景点名，不得保留整句标题；
-         整理失败可留空，系统会写入原始结果（结构化字段为空，仅保留来源）。
+       - digest_json 参数恒留空：搜索 worker 已在通道内完成结构化整理（景点/美食/路线/避坑），
+         系统直接采用其结构化结果，你无需也无法在群聊里重复整理原始内容。
        写入成功后回复以「SEARCH_RESULT」开头：概述推荐景点 top、美食 top、经典路线、避坑提示（各 3-6 条），
        标注来源与是否参考值。
 收到 IMAGE_REQUEST 后：调用 search_spot_images（按请求中的景点清单），

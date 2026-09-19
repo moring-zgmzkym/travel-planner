@@ -38,8 +38,9 @@ python run.py          # 或 Windows 双击 run.bat
    聊天 Agent Chatter ── 常驻（闲置态只跑它，§3.2）
         │ 调用 Tool（§3.3 契约）
    Planning Team（SelectorGroupChat 四 Agent 对等协同，§3.4）
-        InformationProcessor ─ Researcher
-             │               ─ BookingButler（购票/酒店/天气 MCP 专项；定稿阶段二次上台跑路线规划 subagent）
+        InformationProcessor ─ Researcher（收集编排者：攻略8路专题 / 城市封面 / 美食图文 3 worker 并行，
+             │                  定稿阶段再加景点配图 worker；逐通道收割、单通道失败只降级该通道）
+             ─ BookingButler（购票/酒店/天气 MCP 专项；定稿阶段二次上台跑路线规划 subagent）
              └── Planner（草稿 → 图片 → 路线 → PDF）
         │
    共享黑板 TravelProfile（版本号 + changelog + 写入串行化，§3.6）
