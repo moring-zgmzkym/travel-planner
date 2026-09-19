@@ -28,6 +28,22 @@ _IMG_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWe
                               "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
 _IMG_TIMEOUT_S = 10.0
 _PLACEHOLDER_SOURCE = "本地示意配图（模拟数据模式，非实景）"
+# Commons 熔断（2026-09-19）：部分网络环境无法访问 commons.wikimedia.org（大陆网络实测
+# 403/直连超时），每次封面/景点兜底都白等 2×12s——首次真实网络错误后进程内跳过，
+# 重启恢复。测试注入失败后需手动复位该标记。
+_COMMONS_DISABLED = False
+
+
+def _trip_commons_breaker(exc: Exception) -> None:
+    """Commons 网络错误 → 熔断置位（仅 ConnectTimeout/HTTPStatusError 这类真实网络错误）。"""
+    global _COMMONS_DISABLED
+    import httpx as _httpx
+    if isinstance(exc, (_httpx.ConnectTimeout, _httpx.HTTPStatusError)):
+        if not _COMMONS_DISABLED:
+            logger.warning("Commons 不可达（%s: %s），本次运行内跳过后续 Commons 兜底", type(exc).__name__, exc)
+        _COMMONS_DISABLED = True
+
+
 # 已知水印图库（实拍图几乎必带水印/编号，混入 PDF 观感差，2026-08-30 汉中实测）：检索阶段直接跳过
 _WATERMARK_HOSTS = ("huitu.com", "vcg.com", "nipic.com", "58pic.com", "dfic.cn", "sipaphoto.com")
 # 优先图源：权威媒体/官方/百科（实景相关性与画质实测更稳，2026-08-30：光明网/中国日报/界面/西部网等）
@@ -160,8 +176,12 @@ async def _commons_covers(client: httpx.AsyncClient, city: str, count: int) -> l
     是唯一稳定正图源。取原图 url（不传 iiurlwidth），沿用 ≥20000B / ≥1200px / 横版门槛。"""
     from ..config import IMAGE_DIR
 
+    if _COMMONS_DISABLED:
+        return []
     api = "https://commons.wikimedia.org/w/api.php"
     for gsrsearch in (f"{city} skyline", city):
+        if _COMMONS_DISABLED:  # 熔断置位后立即短路（含同一次调用的剩余查询）
+            return []
         params = {
             "action": "query", "format": "json", "generator": "search",
             "gsrsearch": f"filetype:bitmap {gsrsearch}", "gsrlimit": "10", "gsrnamespace": "6",
@@ -172,6 +192,7 @@ async def _commons_covers(client: httpx.AsyncClient, city: str, count: int) -> l
             r.raise_for_status()
             pages = (r.json().get("query") or {}).get("pages") or {}
         except Exception as exc:  # noqa: BLE001 — 单源失败记日志后降级
+            _trip_commons_breaker(exc)
             logger.warning("Commons 封面检索「%s」失败（%s: %s）", gsrsearch, type(exc).__name__, exc)
             continue
         out: list[str] = []
@@ -331,6 +352,8 @@ def _host_rank(url: str) -> int:
 
 async def _commons_images(client: httpx.AsyncClient, spot: str, per_spot: int) -> list[dict]:
     """Wikimedia Commons 文件搜索：真实实拍图，CC 授权要求署名（我们逐图标注来源）。"""
+    if _COMMONS_DISABLED:
+        return []
     api = "https://commons.wikimedia.org/w/api.php"
     params = {
         "action": "query", "format": "json", "generator": "search",
@@ -357,6 +380,7 @@ async def _commons_images(client: httpx.AsyncClient, spot: str, per_spot: int) -
                 break
         return out
     except Exception as exc:  # noqa: BLE001 — 单图源失败记日志后降级
+        _trip_commons_breaker(exc)
         logger.warning("Wikimedia 图片检索「%s」失败（%s: %s）", spot, type(exc).__name__, exc)
         return []
 

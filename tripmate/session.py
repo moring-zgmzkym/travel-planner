@@ -72,10 +72,14 @@ class Session:
     # 类级默认：部分测试以 Session.__new__ 绕过 __init__ 构造，新属性必须有类级兜底
     username: str = ""
     memory_dirty: bool = False
+    sub_states: dict | None = None   # None 仅出现在 __new__ 构造的测试实例；网关路径走 __init__
 
     def __init__(self, sid: str = "", username: str = "") -> None:
         self.sid = sid
         self.username = username
+        # subagent 指示灯真值（channel → running/done/failed）：前端刷新/重连后由
+        # 网关快照补发恢复——STATUS_REPLAY=80 的滚动窗口会被心跳挤出，灯态必须单独记
+        self.sub_states: dict[str, str] = {}
         self.bb = Blackboard()
         self.bus = StatusBus(replay_limit=ServerConfig.STATUS_REPLAY)
         # 团队完成事件队列：草稿就绪 / 定稿完成 / 错误（由后台任务投递，WS 发送协程消费）

@@ -72,7 +72,7 @@ async def wait_port(port: int, timeout_s: float = 30) -> bool:
 async def main() -> int:
     import websockets
 
-    env = dict(os.environ, PORT=str(PORT))
+    env = dict(os.environ, PORT=str(PORT), TRIPMATE_NO_WINDOW="1")  # 冒烟测试不弹应用窗口
     server = subprocess.Popen([sys.executable, str(ROOT / "run.py")], cwd=str(ROOT), env=env,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:

@@ -178,7 +178,10 @@ async function refreshSessions() {
       sel.appendChild(opt);
     }
     sel.value = sid;
-    if (sel.selectedIndex < 0) { sel.value = "default"; sid = "default"; }
+    if (sel.selectedIndex < 0) {
+      sel.value = "default"; sid = "default";
+      localStorage.setItem("tm_sid", sid); // 回落也要落盘：否则下次刷新又选不中（2026-09-19）
+    }
   } catch (e) { /* 列表刷新失败不影响主流程 */ }
 }
 
@@ -197,6 +200,7 @@ function switchSession(nextSid) {
   $("timeline").innerHTML = "";
   hideEtaChip(); // 新会话无运行中阶段
   resetSubLights(); // 新会话灯回灰（防上一会话的状态串灯；重连补播会按序还原本会话灯态）
+  styleSyncTried = false; // 新会话风格继承保险位复位
   setBusy(false);
   if (ws) { manualClose = true; ws.close(); } // 主动断开：立即以新 sid 重连（不走退避），服务端补播该会话状态
 }
@@ -279,6 +283,12 @@ function handleMsg(m) {
     setSubLight(m.channel, m.state);
     return;
   }
+  if (m.type === "sub_states") {
+    // 刷新/重连快照（2026-09-19）：恢复指示灯真值——REPLAY 滚动窗口会被心跳挤出，
+    // 灯态由服务端会话真值单独补发
+    for (const [ch, st] of Object.entries(m.states || {})) setSubLight(ch, st);
+    return;
+  }
   if (m.type === "status" || m.type === "AGENT_MESSAGE") {
     if (m.kind === "STATUS_PHASE") resetSubLights(); // 新阶段/检查点重跑：灯回灰，随查询重新点亮
     addTimeline(m.agent, m.kind || m.type, m.text);
@@ -354,7 +364,21 @@ function addFinal(m) {
 function renderProfile(p) {
   $("profile-ver").textContent = "v" + (p.version || 0);
   const b = p.basic_info || {}, d = p.detail_info || {};
-  currentTemplate = b.template || "lushu";
+  if (b.template) {
+    currentTemplate = b.template;
+    styleSyncTried = false; // 服务端已有真值：保险位复位
+  } else {
+    // 新对话未选过风格：继承浏览器偏好（2026-09-19：跨对话保持），仅当该值在当前
+    // 选项里才同步服务端——陈旧主题名会落入 reportlab 注册表，不能喂给服务端
+    const saved = localStorage.getItem("tm_style") || "";
+    const sel = $("style-select");
+    const known = saved && sel && Array.from(sel.options).some((o) => o.value === saved);
+    if (saved && known && !styleSyncTried) {
+      styleSyncTried = true;
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "template", name: saved }));
+    }
+    currentTemplate = saved || "lushu";
+  }
   applyStyleSelection(currentTemplate); // 回显当前路书风格（旧值不在列表则显示默认）
   const rows = [];
   const kv = (k, v) => v ? rows.push(`<span class="k">${k}</span> ${esc(String(v))}`) : null;
@@ -404,10 +428,11 @@ function flashAgent(name) {
 
 /* ---------- Subagent 指示灯（2026-09-05）：黄=运行中 / 绿=完成 / 红=失败 ---------- */
 const SUB_PARENT = { guides: "Researcher", covers: "Researcher", foods_img: "Researcher", spots_img: "Researcher", tickets: "BookingButler", hotels: "BookingButler", weather: "BookingButler", route: "BookingButler" };
+const SUB_CHANNELS = Object.keys(SUB_PARENT); // 通道单一来源：灯校验与父归属共用（2026-09-19）
 const subStates = {}; // channel → "running" | "done" | "failed"
 
 function setSubLight(channel, state) {
-  if (!channel || !["guides", "covers", "foods_img", "spots_img", "tickets", "hotels", "weather", "route"].includes(channel)) {
+  if (!channel || !SUB_CHANNELS.includes(channel)) {
     return; // 未知通道忽略（前向兼容：服务端新增通道前端不炸）
   }
   subStates[channel] = state;
@@ -487,6 +512,7 @@ $("stop-plan").addEventListener("click", () => {
 
 /* ---------- 路书风格选择（定稿 PDF 使用；列表来自 /api/templates 的 html 主题） ---------- */
 let currentTemplate = "lushu"; // 最近一次 profile 快照回显的风格（供选项异步加载完成后回显）
+let styleSyncTried = false;    // 风格继承保险位：每会话画像只自动同步一次，杜绝消息循环
 
 async function loadStyleOptions() {
   const sel = $("style-select");
@@ -520,6 +546,8 @@ function applyStyleSelection(template) {
 
 $("style-select").addEventListener("change", () => {
   const sel = $("style-select");
+  if (!sel.value) return;
+  localStorage.setItem("tm_style", sel.value); // 跨对话保持（2026-09-19）
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "template", name: sel.value }));
 });
 loadStyleOptions();
@@ -578,10 +606,14 @@ $("logout").addEventListener("click", () => {
 $("tab-login").addEventListener("click", () => setAuthMode("login"));
 $("tab-register").addEventListener("click", () => setAuthMode("register"));
 $("auth-submit").addEventListener("click", submitAuth);
+$("auth-username").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") submitAuth(); // 用户名框回车直接提交（此前只有密码框有）
+});
 $("auth-password").addEventListener("keydown", (e) => {
   if (e.key === "Enter") submitAuth();
 });
 $("memory-clear").addEventListener("click", async () => {
+  if (!confirm("确定清空全部偏好记忆？此操作不可恢复。")) return;
   try {
     await authFetch("/api/memory", { method: "DELETE" });
     refreshMemory();

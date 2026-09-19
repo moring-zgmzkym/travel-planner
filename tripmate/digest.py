@@ -35,9 +35,12 @@ _IMG_TIMEOUT_S = 12.0
 _MAX_CORPUS_CHARS = 6000
 
 # 工具型 JSON 提炼统一降思考力度（2026-09-19 e2e 根因：glm-5.3-flash 思考 token 计入
-# max_tokens=8192，重提示词下推理耗尽预算 → content 为空/结构化全空/群聊消息被清洗成占位；
+# max_tokens，重提示词下推理耗尽预算 → content 为空/结构化全空/群聊消息被清洗成占位；
 # effort low 实测 8/8 行正常产出，且不再出现空 content）。规划类 Agent 不套用，保留深度思考。
-_LLM_JSON_ARGS = {"extra_create_args": {"extra_body": {"thinking": {"type": "enabled", "effort": "low"}}}}
+# max_tokens 16384（2026-09-19 实测通过：autogen 路径接受、正常产出）——拥堵期推理变长时
+# 给正文留余量，健康期模型自行 stop 不受影响。
+_LLM_JSON_ARGS = {"extra_create_args": {"extra_body": {"thinking": {"type": "enabled", "effort": "low"}},
+                                        "max_tokens": 16384}}
 
 _PROMPT = """你是旅行攻略编辑。下面是关于「{city}」的攻略搜索摘要原文（可能不完整）。
 请从中提炼：

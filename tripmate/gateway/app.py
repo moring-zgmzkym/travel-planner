@@ -498,6 +498,8 @@ async def _sender(ws: WebSocket, sess: Session, sub=None, last_seq: int = 0) -> 
     断开/取消时退订本会话总线（多会话隔离：不残留订阅、不串台）。
     """
     sess._sender_task = asyncio.current_task()
+    if getattr(sess, "sub_states", None) is None:   # SimpleNamespace 桩/老式测试实例兜底
+        sess.sub_states = {}
     if sub is None:
         sub = sess.bus.subscribe()
     status_task = asyncio.create_task(sub.get())
@@ -524,6 +526,13 @@ async def _sender(ws: WebSocket, sess: Session, sub=None, last_seq: int = 0) -> 
                         await _push_stream_error(sess, f"推送通道异常：{e}")
                     continue
                 if is_status:
+                    # subagent 灯态真值（会话级）：刷新/重连后快照补发恢复——置位与前端
+                    # resetSubLights 触发点一一对应（STATUS_PHASE/终态清空，CHECKPOINT 不清）
+                    kind = item.get("kind")
+                    if kind == "STATUS_SUBAGENT" and item.get("channel"):
+                        sess.sub_states[item.get("channel")] = item.get("state") or ""
+                    elif kind in ("STATUS_PHASE", "STATUS_COMPLETED", "STATUS_CANCELLED", "STATUS_ERROR"):
+                        sess.sub_states.clear()
                     if not stale and item.get("seq", 0) > last_seq:  # 补播窗口去重（修复 #17）
                         await _send(ws, item)  # STATUS_* / AGENT_MESSAGE
                 else:
@@ -554,6 +563,10 @@ async def _replay_snapshot(ws: WebSocket, sid: str, sess: Session) -> bool:
             await _send(ws, {**ev, "replay": True})
         await _send(ws, {"type": "session", "sid": sid, "title": _session_title(sess)})
         await _send(ws, {"type": "profile", "profile": sess.profile_snapshot()})
+        # 刷新/重连后恢复：Token 面板（否则归零到下次事件）与 subagent 灯态
+        # （STATUS_REPLAY 滚动窗口会被心跳挤出，灯态由会话真值单独补发）
+        await _send(ws, {"type": "usage", "usage": usage_summary(sess.runner._usage_baseline)})
+        await _send(ws, {"type": "sub_states", "states": dict(sess.sub_states)})
     except Exception as e:  # noqa: BLE001 — 核心历史补播失败：连接不可信
         AUDIT.output("Gateway", f"重连补播历史失败（{type(e).__name__}: {e}），关闭本次连接")
         return False
@@ -689,4 +702,6 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
 def main() -> None:
     import uvicorn
+    from ..app_window import open_app_window_async
+    open_app_window_async()  # 服务起来后弹独立应用窗口（TRIPMATE_NO_WINDOW=1 可禁用）
     uvicorn.run(app, host=ServerConfig.HOST, port=ServerConfig.PORT, log_level="info")
