@@ -100,12 +100,16 @@ def test_pre_coerce_field_dirty_llm_inputs():
     assert _pre_coerce_field("origin", "上海") == "上海"
 
 
-def test_check_budget_per_run_baseline_isolation():
+def test_check_budget_per_run_baseline_isolation(monkeypatch):
     """per-run 基线：多会话各自记账，B 会话重锚不影响 A 的熔断判定（2026-09-05 修复）。"""
     import asyncio
     from autogen_core.models import RequestUsage
     from tripmate import llm
     from tripmate.config import BudgetConfig
+
+    # 钉住预算上限：否则测试隐含 "600000 > 500000" 的前提会被 .env 的 TOKEN_BUDGET
+    # 覆盖击穿（2026-09-20 实测：用户改 800000 后此用例假失败）——本用例测的是隔离逻辑
+    monkeypatch.setattr(BudgetConfig, "TOKEN_LIMIT", 500000)
 
     class FakeClient:
         def __init__(self, used):

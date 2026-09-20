@@ -210,6 +210,31 @@ class Session:
                 AUDIT.output("Chatter", f"用户消息处理超过 {int(CHAT_TIMEOUT_S)}s，重建 Chatter 实例丢弃污染上下文")
                 self.chatter = build_chatter(self.bb, self.bus, self.runner)
                 return "（系统提示）刚才的请求处理超时了，请把需求再发一次，我会重新处理。"
+            except RuntimeError as e:
+                # 思考型模型（deepseek/glm）反思轮偶发无文本：工具已真正执行、结果仍在
+                # 模型上下文里——不重建实例（重建会丢掉刚拿到的工具结果），nudge 一轮
+                # 直接总结；再失败才降级为"请重发"（2026-09-20 用户会话 3/3 失败的根治）。
+                if "Reflect on tool use" not in str(e):
+                    AUDIT.output("Chatter", f"用户消息处理失败（{type(e).__name__}: {e}），重建 Chatter 实例")
+                    self.chatter = build_chatter(self.bb, self.bus, self.runner)
+                    return "（系统提示）刚才的请求没有处理成功，请把需求再发一次，我会重新处理。"
+                AUDIT.output("Chatter", "反思轮无文本响应（llm 层重试后仍无文本），nudge 补一轮总结")
+                try:
+                    reply = await asyncio.wait_for(
+                        stream_chatter(self.chatter,
+                                       "上一轮工具已执行成功，但总结回复生成失败。请基于已获得的工具结果，"
+                                       "直接用一两句自然的中文回复用户当前进展与下一步建议，"
+                                       "不要再次调用任何工具。",
+                                       source="system", seen_tools=tools_seen),
+                        timeout=CHAT_TIMEOUT_S)
+                except (asyncio.TimeoutError, RuntimeError) as e2:
+                    AUDIT.output("Chatter", f"反思 nudge 仍未产出文本（{type(e2).__name__}），重建 Chatter")
+                    self.chatter = build_chatter(self.bb, self.bus, self.runner)
+                    reply = ""
+                reply = (reply or "").strip()
+                if not reply:
+                    self.chatter = build_chatter(self.bb, self.bus, self.runner)
+                    return "（系统提示）刚才的请求没有处理成功，请把需求再发一次，我会重新处理。"
             except Exception as e:  # noqa: BLE001 — 非超时 LLM 失败（如主备双通道连接错误，2026-09-04 实测）：
                 # 与超时同源处理：重建实例丢弃污染上下文（无回应的用户消息残留在对话里）
                 AUDIT.output("Chatter", f"用户消息处理失败（{type(e).__name__}: {e}），重建 Chatter 实例丢弃污染上下文")

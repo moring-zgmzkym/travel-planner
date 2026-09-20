@@ -47,6 +47,65 @@ def test_empty_content_retried_on_same_channel():
     assert client._on_primary  # 空 content 属同通道重试，不是主模型故障，不得触发切换
 
 
+class _NoneContentClient(ReplayChatCompletionClient):
+    """第一次 create 返回 content=None（deepseek 反思轮实测形态：
+    2026-09-19 用户会话 3/3 失败，autogen 抛 "Reflect on tool use"），之后返回预置回复。"""
+
+    def __init__(self, reply: str):
+        super().__init__([reply])
+        self.calls = 0
+
+    async def create(self, messages, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            import types
+            from autogen_core.models import RequestUsage
+            return types.SimpleNamespace(
+                content=None, finish_reason="stop", thought=None,
+                usage=RequestUsage(prompt_tokens=1, completion_tokens=1),
+                cached=False, logprobs=None)
+        return await super().create(messages, **kwargs)
+
+
+def test_none_content_retried_on_same_channel():
+    """content=None 与空串同病同治：同通道立即重试一次，不触发主备切换。"""
+    primary = _NoneContentClient("重试后的回复")
+    client = _FallbackClient(primary, ReplayChatCompletionClient(["次级回复"]))
+    assert asyncio.run(client.create([_MSG()])).content == "重试后的回复"
+    assert client._on_primary
+
+
+class _ListNoToolsClient(ReplayChatCompletionClient):
+    """无 tools 的调用返回 FunctionCall 列表（deepseek 未遵守 tool_choice=none，
+    2026-09-20 反思轮实测形态），之后返回预置文本回复。"""
+
+    def __init__(self, reply: str):
+        super().__init__([reply])
+        self.calls = 0
+
+    async def create(self, messages, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            import types
+            from autogen_core import FunctionCall
+            from autogen_core.models import RequestUsage
+            return types.SimpleNamespace(
+                content=[FunctionCall(id="x", name="save_travel_info", arguments="{}")],
+                finish_reason="tool_calls", thought=None,
+                usage=RequestUsage(prompt_tokens=1, completion_tokens=1),
+                cached=False, logprobs=None)
+        return await super().create(messages, **kwargs)
+
+
+def test_no_tools_call_returning_list_retried_on_same_channel():
+    """无 tools 调用返回 FunctionCall 列表 = 端点未遵守 tool_choice=none：重试一次。
+    带 tools 的正常工具调用轮返回列表是合法产出，绝不受影响。"""
+    primary = _ListNoToolsClient("重试后的回复")
+    client = _FallbackClient(primary, ReplayChatCompletionClient(["次级回复"]))
+    assert asyncio.run(client.create([_MSG()])).content == "重试后的回复"
+    assert client._on_primary
+
+
 def test_primary_failure_switches_to_secondary():
     primary = _FlakyClient("主模型回复", fail_times=999)
     client = _FallbackClient(primary, ReplayChatCompletionClient(["次级回复"]))

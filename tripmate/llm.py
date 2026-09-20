@@ -160,11 +160,21 @@ class _FallbackClient(ChatCompletionClient, Component[_FallbackConfig]):
                         extra_create_args=extra_create_args,
                         cancellation_token=cancellation_token,
                     )
-                    if isinstance(result.content, str) and not result.content.strip():
-                        # 思考型模型偶发只回推理不回正文（content 为空串）——2026-09-19 e2e 实测：
-                        # 攻略结构化空回退、锦囊提炼空、群聊消息被清洗成占位，均此根因。
-                        # 同通道立即重试一次；仍空则原样返回，由上层既有降级链兜底。
-                        logger.warning("%s 返回空 content，同通道立即重试", self._label(idx))
+                    # 无文本产出判定（2026-09-20，deepseek 实测三种形态）：
+                    # ① content=""（结构化空回退/群聊消息清洗成占位）；
+                    # ② content=None（反思轮 → autogen 抛 "Reflect on tool use"，用户消息失败）；
+                    # ③ 无 tools 的调用（反思轮 tool_choice="none"）返回 FunctionCall 列表
+                    #    ——端点未遵守 tool_choice，autogen 同样抛无文本响应错误。
+                    # 三者同通道重试，最多 2 次（共 3 次尝试）：连续无文本实测可达 2 次
+                    # （2026-09-20 用户会话），单次重试不够；带 tools 的正常工具调用轮
+                    # 返回列表是合法产出，绝不重试。仍无文本则原样返回走上层降级链。
+                    for _no_text_retry in range(2):
+                        content = result.content
+                        if not (content is None
+                                or (isinstance(content, str) and not content.strip())
+                                or (not tools and isinstance(content, list))):
+                            break
+                        logger.warning("%s 返回空/None/无 tools 列表 content，同通道立即重试", self._label(idx))
                         result = await self._client(idx).create(
                             messages,
                             tools=tools,

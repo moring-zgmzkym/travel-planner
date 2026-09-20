@@ -120,15 +120,23 @@ async def ensure_travel_dates(bb: Blackboard, bus: StatusBus) -> bool:
 
 def build_chatter(bb: Blackboard, bus: StatusBus, runner: TeamRunner,
                   memory_text: str = "") -> AssistantAgent:
-    async def save_travel_info(basic_info: str, detail_info: str) -> str:
+    async def save_travel_info(basic_info: str | dict, detail_info: str | dict) -> str:
         """把本轮抽取到的旅行画像字段写入共享黑板（未提及的字段不要传）。
         basic_info：JSON 对象，可含 origin、destination、days、travel_mode、travel_dates、date_text、
                     style、budget、budget_max、party_size；
         detail_info：JSON 对象，可含 hotel{location_pref,price_range,min_star}、must_visit、
-                    food_restrictions、pace、special_needs。两者可为空对象 {}。"""
+                    food_restrictions、pace、special_needs。两者可为空对象 {}。
+        参数兼容 str 与 dict（2026-09-20）：deepseek 实测按 docstring 直接传 JSON 对象，
+        而 glm 传 JSON 字符串——注解只收 str 会让前者 100% 参数校验失败。"""
+        def _as_dict(v: str | dict) -> dict:
+            if isinstance(v, dict):
+                return v
+            if isinstance(v, str) and v.strip():
+                return json.loads(v)
+            return {}
         try:
-            basic_updates = json.loads(basic_info) if basic_info and basic_info.strip() else {}
-            detail_updates = json.loads(detail_info) if detail_info and detail_info.strip() else {}
+            basic_updates = _as_dict(basic_info)
+            detail_updates = _as_dict(detail_info)
         except json.JSONDecodeError as e:
             return json.dumps({"status": "error", "error": f"JSON 解析失败：{e}"}, ensure_ascii=False)
         if not isinstance(basic_updates, dict) or not isinstance(detail_updates, dict):
