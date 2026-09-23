@@ -1055,44 +1055,62 @@ class TeamRunner:
             self._phase_started = asyncio.get_running_loop().time()
             hb = asyncio.create_task(self._heartbeat(phase))
             try:
-                check_budget(self._usage_baseline)
-                await self._run_phase(phase, changed_fields)
-                if phase == "collect":
-                    # §3.8 检查点：阶段边界读黑板，比对版本号，变更影响分析 → 增量重跑
-                    # （revise 阶段不设检查点：草稿反馈循环本身就在消化该轮变更，避免双重重跑）
-                    while self._rerun_budget > 0:
-                        changes = self.bb.user_changes_since(self._base_version)
-                        if not changes:
-                            break
-                        fields = _changed_fields(changes)
-                        affected = analyze_impact(fields)
-                        if affected - {"itinerary"}:
-                            self._rerun_budget -= 1
+                # 反思轮无文本重试圈（2026-09-23 e2e 实测）：新主模型端点偶发对工具轮返回空
+                # content / 连接重置，autogen 抛 "Reflect on tool use"——团队路径没有 Chatter
+                # 那样的 nudge 兜底，阶段直接猝死、用户收到"运行异常"且要重跑全流程。
+                # llm 层末次无 tools 请求先拦掉大部分此类失败；这里是连接重置类漏网时的保险：
+                # 单次重试该阶段（黑板已收集数据仍在，重试由护栏/回退草稿收尾），熔断不重试。
+                for attempt in range(2):
+                    try:
+                        check_budget(self._usage_baseline)
+                        await self._run_phase(phase, changed_fields)
+                        if phase == "collect":
+                            # §3.8 检查点：阶段边界读黑板，比对版本号，变更影响分析 → 增量重跑
+                            # （revise 阶段不设检查点：草稿反馈循环本身就在消化该轮变更，避免双重重跑）
+                            while self._rerun_budget > 0:
+                                changes = self.bb.user_changes_since(self._base_version)
+                                if not changes:
+                                    break
+                                fields = _changed_fields(changes)
+                                affected = analyze_impact(fields)
+                                if affected - {"itinerary"}:
+                                    self._rerun_budget -= 1
+                                    self._base_version = self.bb.version()
+                                    note = (f"检查点：检测到用户变更 [{'， '.join(fields)}] → 影响分析 "
+                                            f"{sorted(affected)}，增量重跑受影响环节")
+                                    AUDIT.thought("TeamRunner", note)
+                                    await self.bus.emit("TeamRunner", "检测到信息变更：" + "，".join(fields)
+                                                        + "｜按变更影响分析增量重跑（未受影响环节复用缓存）",
+                                                        "STATUS_CHECKPOINT")
+                                    await self._run_phase("collect", changed_fields=fields)
+                                else:
+                                    self._base_version = self.bb.version()
+                                    await self.bus.emit("TeamRunner", "检测到风格/必经景点类变更 → 仅行程重排（下轮草稿体现）",
+                                                        "STATUS_CHECKPOINT")
+                                    break
+                        if phase in ("collect", "revise"):
                             self._base_version = self.bb.version()
-                            note = (f"检查点：检测到用户变更 [{'， '.join(fields)}] → 影响分析 "
-                                    f"{sorted(affected)}，增量重跑受影响环节")
-                            AUDIT.thought("TeamRunner", note)
-                            await self.bus.emit("TeamRunner", "检测到信息变更：" + "，".join(fields)
-                                                + "｜按变更影响分析增量重跑（未受影响环节复用缓存）",
-                                                "STATUS_CHECKPOINT")
-                            await self._run_phase("collect", changed_fields=fields)
-                        else:
-                            self._base_version = self.bb.version()
-                            await self.bus.emit("TeamRunner", "检测到风格/必经景点类变更 → 仅行程重排（下轮草稿体现）",
-                                                "STATUS_CHECKPOINT")
-                            break
-                if phase in ("collect", "revise"):
-                    self._base_version = self.bb.version()
-                    draft = self.bb.profile.draft
-                    if draft:
-                        self._awaiting_feedback = True
-                        if self.on_draft_ready:
-                            self.on_draft_ready(draft)
-                elif phase == "finalize":
-                    final = self.bb.profile.final
-                    self.active = False
-                    if final and self.on_completed:
-                        self.on_completed(final)
+                            draft = self.bb.profile.draft
+                            if draft:
+                                self._awaiting_feedback = True
+                                if self.on_draft_ready:
+                                    self.on_draft_ready(draft)
+                        elif phase == "finalize":
+                            final = self.bb.profile.final
+                            self.active = False
+                            if final and self.on_completed:
+                                self.on_completed(final)
+                        break
+                    except TokenBudgetExceeded:
+                        raise  # 熔断不重试：重试只会再烧一次超额预算
+                    except Exception as e:  # noqa: BLE001 — 判定是否值得重试一次
+                        if attempt == 0 and "Reflect on tool use" in str(e):
+                            AUDIT.output("TeamRunner",
+                                         f"反思轮无文本响应（{type(e).__name__}），阶段重试一次")
+                            await self.bus.emit("TeamRunner", "模型偶发无响应，团队正在重试该阶段…",
+                                                "STATUS_INFO")
+                            continue
+                        raise
             except TokenBudgetExceeded as e:
                 self.active = False
                 # 预算已死：待反馈态复位（隐患修正）——不做崩溃抢救，防"提交反馈→再熔断"死循环

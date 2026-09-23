@@ -64,7 +64,8 @@ python run.py          # 或 Windows 双击 run.bat
 | `tripmate/gateway/app.py` | FastAPI + WebSocket 网关 |
 | `static/` | 前端三件套（原生 JS） |
 | `tests/` | 单测（黑板/影响分析/打分/校验/selector/路书PDF（HTML 主路径+reportlab 降级）/主备切换/二次规划/会话），引擎不可用时 HTML 用例自动 skip、降级路径仍被守护 |
-| `scripts/` | 端到端冒烟脚本（e2e_step1/2/3） |
+| `scripts/` | 端到端冒烟（e2e_step1~4、e2e_shannan_case）与诊断脚本（probe_*/render_*；ws_status_smoke 已失效待修） |
+| `文件修改注意事项.md` | **改代码前必读**：文件作用索引 + 跨文件联动速查表 + 分类检查清单 |
 | `outputs/` | PDF 与配图产物 |
 | `logs/tripmate.log` | ReAct 审计日志（Thought→Action→Observation→产出，验收 #16 证据） |
 
@@ -100,7 +101,7 @@ python run.py          # 或 Windows 双击 run.bat
 ## 测试
 
 ```bash
-python -m pytest tests/ -q          # 64 项单测
+python -m pytest tests/ -q          # 228 项单测
 python scripts/e2e_step1_chatter.py # 冒烟① Chatter 抽取与启动判定（需 LLM）
 python scripts/e2e_step2_collect.py # 冒烟② 四 Agent 协同出草稿（需 LLM）
 python scripts/e2e_step3_full.py    # 冒烟③ 中途改预算→反馈修订→确认→PDF 全流程（需 LLM）

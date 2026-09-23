@@ -150,6 +150,26 @@ def test_session_isolation_between_users(isolated):
     _run(main())
 
 
+def test_sessions_list_includes_disk_only_sessions(isolated):
+    """重启后落盘会话补进下拉列表：此前只列内存注册表，历史对话数据在
+    sessions/{用户}/*.json 里但 UI 上不可达（与"重启自动恢复"的文档承诺不符）。"""
+    from tripmate import persistence
+    from tripmate.models import TravelProfile
+
+    profile = TravelProfile()
+    profile.basic_info.destination = "西安"
+    persistence.save_session("s-deadbeef", [], profile.model_dump(mode="json"), "alice")
+
+    async def main():
+        async with _client() as c:
+            alice = await _register(c, "alice")
+            r = await c.get("/api/sessions", headers=_auth(alice["token"]))
+            entries = r.json()
+            assert [s["sid"] for s in entries] == ["s-deadbeef"]
+            assert entries[0]["title"] == "西安 · 收集需求中"
+    _run(main())
+
+
 # ---- PDF 鉴权交付与分享 ----
 
 def _session_with_final(username: str, sid: str, pdf_name: str = "行程计划_成都_insuranc.pdf"):

@@ -88,6 +88,17 @@ def test_start_intent_regex_variants():
     assert not _START_INTENT.search("规划团队还没启动，请稍候。")
     assert not _START_INTENT.search("先别开工，我还没想好。")
     assert not _START_INTENT.search("规划团队还没开工。")
+    # 2026-09-23 e2e 实测第 5 种漏接变体：新主模型反思轮连续空回复 → nudge 总结轮禁工具，
+    # start_planning 丢失；总结措辞"接下来规划团队将为您生成行程草案"无任何"开始/启动"字样
+    assert _START_INTENT.search("您的需求已全部记下，接下来规划团队将为您生成行程草案，稍后给您过目。")
+    assert _START_INTENT.search("我马上为您制定行程方案。")
+    # 同轮 e2e 复现的第二种措辞（"出方案"）："出" anchored 在"规划团队"之后，防误伤
+    assert _START_INTENT.search("这就请规划团队为您出方案，草稿出来我会第一时间告诉您。")
+    # 负向：新分支同样不得命中延迟/拒绝语义与普通追问
+    assert not _START_INTENT.search("暂不生成行程，请先补充预算。")
+    assert not _START_INTENT.search("信息还不全，暂时无法生成方案。")
+    assert not _START_INTENT.search("规划团队还没出方案，请稍候。")
+    assert not _START_INTENT.search("请问您的预算范围是多少呢？")
 
 
 # ---- 缺字段闸门（问题 2 回归）----
@@ -255,6 +266,52 @@ def test_phase_crash_rescues_draft_delivery(monkeypatch):
     asyncio.run(r._phase_loop("collect"))
     assert len(delivered) == 1 and r._awaiting_feedback  # 草稿已抢救送达
     assert any(e.get("kind") == "STATUS_ERROR" for e in r.bus.history())  # 错误仍上报
+
+
+def test_phase_reflect_no_text_retried_once(monkeypatch):
+    """反思轮无文本（autogen RuntimeError）→ 阶段重试一次后成功交付（2026-09-23 e2e：
+    新主模型端点偶发对工具轮返回空 content / 连接重置，团队路径无 Chatter 那样的
+    nudge 兜底，阶段直接猝死、用户收到"运行异常"且要重跑全流程）。"""
+    from tripmate.models import Draft, DraftDay
+    bb = _bb("汉中")
+    r = TeamRunner(bb, StatusBus())
+    r.run_id = "t"
+    delivered = []
+    r.on_draft_ready = lambda d: delivered.append(d)
+    calls = []
+
+    async def boom_once(phase, changed_fields=None):
+        calls.append(phase)
+        if len(calls) == 1:
+            raise RuntimeError("Reflect on tool use produced no valid text response.")
+        await bb.write("draft", Draft(days=[DraftDay(
+            date="2026-10-01", morning="m", afternoon="a", evening="e", spots=["s"])],
+            budget_total=1.0), "planner", "测试草稿")
+
+    monkeypatch.setattr(r, "_run_phase", boom_once)
+    asyncio.run(r._phase_loop("collect"))
+    assert len(calls) == 2 and len(delivered) == 1 and r._awaiting_feedback
+    assert any("重试该阶段" in (e.get("text") or "") for e in r.bus.history())
+    assert not any(e.get("kind") == "STATUS_ERROR" for e in r.bus.history())  # 重试成功不上报错误
+
+
+def test_phase_reflect_no_text_second_failure_still_reported(monkeypatch):
+    """重试后仍失败：仅重试一次，错误照常上报 + 走崩溃抢救（不留静默猝死）。"""
+    bb = _bb("汉中")
+    r = TeamRunner(bb, StatusBus())
+    r.run_id = "t"
+    errors = []
+    r.on_error = lambda e: errors.append(e)
+    calls = []
+
+    async def always_boom(phase, changed_fields=None):
+        calls.append(phase)
+        raise RuntimeError("Reflect on tool use produced no valid text response.")
+
+    monkeypatch.setattr(r, "_run_phase", always_boom)
+    asyncio.run(r._phase_loop("collect"))
+    assert len(calls) == 2  # 只重试一次，不死循环
+    assert errors and any(e.get("kind") == "STATUS_ERROR" for e in r.bus.history())
 
 
 # ---- start() 黑板清理（问题 1 回归）----

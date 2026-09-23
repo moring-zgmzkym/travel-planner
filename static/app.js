@@ -304,6 +304,8 @@ function handleMsg(m) {
     addFinal(m);
     renderOrders(m.orders, m.total_price);
     hideEtaChip(); // 成品已到达，预计等待结束
+  } else if (m.type === "memory") {
+    refreshMemory(); // 服务端偏好沉淀完成后推送（此前面板停在"暂无沉淀"直到手动刷新）
   } else if (m.type === "profile") {
     renderProfile(m.profile);
   } else if (m.type === "usage") {
@@ -359,6 +361,7 @@ function addFinal(m) {
   chat.appendChild(div);
   chat.scrollTop = chat.scrollHeight;
   refreshMemory(); // 定稿后偏好记忆可能已沉淀
+  refreshSessions(); // 会话标题由黑板状态派生：定稿后即时刷新为"已完成"（此前停留"收集需求中"）
 }
 
 function renderProfile(p) {
@@ -383,7 +386,9 @@ function renderProfile(p) {
   const rows = [];
   const kv = (k, v) => v ? rows.push(`<span class="k">${k}</span> ${esc(String(v))}`) : null;
   kv("出发地", b.origin); kv("目的地", b.destination); kv("天数", b.days);
-  kv("日期", (b.travel_dates || []).join(" ~ ") || b.date_text);
+  // 多天行程显示起止范围（"10-01 ~ 10-03"）：逐日用 " ~ " 串联会被误读成三段区间
+  const dts = b.travel_dates || [];
+  kv("日期", dts.length >= 2 ? `${dts[0]} ~ ${dts[dts.length - 1]}` : (dts[0] || b.date_text));
   kv("方式", b.travel_mode); kv("风格", (b.style || []).join("/"));
   kv("人数", b.party_size); kv("预算", b.budget); kv("预算上限", b.budget_max);
   if (d.hotel && (d.hotel.location_pref || (d.hotel.price_range || []).length))

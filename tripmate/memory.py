@@ -156,9 +156,11 @@ async def capture_from_profile(username: str, profile: TravelProfile) -> bool:
         old["preferences"] = items
         final = profile.final
         if final is not None and (profile.basic_info.destination or "").strip():
+            # 多日行程记起止范围：逐日用 " ~ " 串联会被误读成三段区间（与前端画像显示一致）
+            trip_dates = profile.basic_info.travel_dates[:4]
             old["trips"] = ([{
                 "destination": profile.basic_info.destination,
-                "dates": " ~ ".join(profile.basic_info.travel_dates[:4]),
+                "dates": " ~ ".join([trip_dates[0], trip_dates[-1]]) if trip_dates else "",
                 "total_price": final.total_price,
                 "finalized_at": time.strftime("%Y-%m-%d %H:%M"),
             }] + (old.get("trips") or []))[:20]

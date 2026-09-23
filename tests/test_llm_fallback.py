@@ -75,6 +75,41 @@ def test_none_content_retried_on_same_channel():
     assert client._on_primary
 
 
+class _EmptyToolRoundsClient(ReplayChatCompletionClient):
+    """工具轮连续返回 content=None（2026-09-23 e2e 实测：新主模型聚合端点反思轮），
+    无 tools 请求才返回文本（模拟末次去工具请求救回，端点对无 tools 请求稳定返文本）。"""
+
+    def __init__(self, reply: str):
+        super().__init__([reply])
+        self.tool_rounds = 0
+
+    async def create(self, messages, tools=None, tool_choice="auto", **kwargs):
+        if tools:
+            self.tool_rounds += 1
+            import types
+            from autogen_core.models import RequestUsage
+            return types.SimpleNamespace(
+                content=None, finish_reason="stop", thought=None,
+                usage=RequestUsage(prompt_tokens=1, completion_tokens=1),
+                cached=False, logprobs=None)
+        return await super().create(messages, tools=tools, tool_choice=tool_choice, **kwargs)
+
+
+def test_empty_tool_round_recovers_via_no_tools_request():
+    """工具轮 3 次空 content 后放行一次无 tools 请求（2026-09-23：反思轮持续空回复令
+    autogen 抛 "Reflect on tool use"，Chatter 路径有 nudge 兜底、团队路径没有——
+    阶段直接猝死；末次去工具请求只求总结文本，工具结果已在上下文里）。"""
+    from autogen_core.tools import ParametersSchema, ToolSchema
+    tool = ToolSchema(name="t", description="d",
+                      parameters=ParametersSchema(type="object", properties={}))
+    primary = _EmptyToolRoundsClient("无 tools 总结")
+    client = _FallbackClient(primary, ReplayChatCompletionClient(["次级回复"]))
+    result = asyncio.run(client.create([_MSG()], tools=[tool], tool_choice="auto"))
+    assert result.content == "无 tools 总结"
+    assert primary.tool_rounds == 3  # 初始 + 2 次同通道重试；第 4 次为放行的去工具请求
+    assert client._on_primary  # 空 content 是同通道病症，不得触发主备切换
+
+
 class _ListNoToolsClient(ReplayChatCompletionClient):
     """无 tools 的调用返回 FunctionCall 列表（deepseek 未遵守 tool_choice=none，
     2026-09-20 反思轮实测形态），之后返回预置文本回复。"""

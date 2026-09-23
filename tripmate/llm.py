@@ -183,6 +183,23 @@ class _FallbackClient(ChatCompletionClient, Component[_FallbackConfig]):
                             extra_create_args=extra_create_args,
                             cancellation_token=cancellation_token,
                         )
+                    # 2026-09-23 e2e 实测（新主模型 deepseek-v4-flash-0731 聚合端点）：
+                    # 工具轮偶发持续返回空 content，3 次重试后 autogen 对团队路径抛
+                    # "Reflect on tool use"（Chatter 路径有 session 层 nudge 兜底，团队没有，
+                    # 阶段直接猝死）。最后放行一次无 tools 请求只求总结文本——工具结果已在
+                    # 上下文里，端点对无 tools 请求稳定返文本；仍空则原样返回走上层降级链。
+                    if tools and (result.content is None
+                                  or (isinstance(result.content, str) and not result.content.strip())):
+                        logger.warning("%s 工具轮连续无文本，放行最后一次无 tools 请求", self._label(idx))
+                        try:
+                            result = await self._client(idx).create(
+                                messages, tools=[], tool_choice="none",
+                                json_output=json_output,
+                                extra_create_args=extra_create_args,
+                                cancellation_token=cancellation_token,
+                            )
+                        except Exception:  # noqa: BLE001 — 去工具请求失败不改原上报路径
+                            pass
                     self._note_success(idx)
                     return result
                 except Exception as exc:  # noqa: BLE001 — 主备逐个尝试，全部失败才上抛

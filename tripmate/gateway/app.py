@@ -37,7 +37,7 @@ from ..planning import compute_budget
 from ..session import Session
 from ..status import AUDIT, event_json
 
-from ..persistence import safe_sid
+from ..persistence import load_session, safe_sid
 
 
 @asynccontextmanager
@@ -177,10 +177,32 @@ async def index() -> HTMLResponse:
     return (BASE_DIR / "static" / "index.html").read_text(encoding="utf-8")
 
 
+def _file_only_title(profile: dict | None) -> str:
+    """落盘但未加载进内存的会话标题：与 _session_title 同构（去掉"规划中"——无运行时）。"""
+    p = profile or {}
+    dest = (p.get("basic_info") or {}).get("destination") or "新对话"
+    stage = "已完成" if p.get("final") else ("待确认草稿" if p.get("draft") else "收集需求中")
+    return f"{dest} · {stage}"
+
+
 @app.get("/api/sessions")
 async def list_sessions(user: str = Depends(_auth_user)) -> JSONResponse:
     out = [{"sid": _sid_of(key), "title": _session_title(sess)}
            for key, sess in sessions.items() if key.split("/", 1)[0] == user]
+    # 落盘但未加载的会话（重启后没重连过的）：补进列表——否则历史对话虽然在
+    # sessions/{用户}/*.json 里躺着，下拉框却只列内存注册表，用户在 UI 上再也回不去
+    # （与"重启后刷新页面自动恢复"的文档承诺不符）。标题从持久化画像派生（同构），
+    # 切换到该会话时完整恢复、标题转实时。按文件时间倒序（新对话在前）。
+    seen = {o["sid"] for o in out}
+    user_dir = SESSIONS_DIR / user
+    if user_dir.is_dir():
+        for p in sorted(user_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+            if p.stem in seen:
+                continue
+            data = load_session(p.stem, user)  # 损坏/不存在返回 None，不进列表
+            if data:
+                out.append({"sid": p.stem, "title": _file_only_title(data.get("profile"))})
+                seen.add(p.stem)
     return JSONResponse(out)
 
 
@@ -398,12 +420,18 @@ async def _push_stream_error(sess: Session, text: str) -> None:
         pass
 
 
-async def _capture_memory(sess: Session) -> None:
+async def _capture_memory(sess: Session, ws: WebSocket | None = None) -> None:
     """定稿后沉淀偏好记忆（后台任务，失败不影响任何主流程）；成功则置脏等下次消息热重建。"""
     try:
         ok = await memory.capture_from_profile(sess.username, sess.bb.profile)
         if ok:
             sess.memory_dirty = True
+            # 沉淀完成即推送刷新前端记忆面板：addFinal 里的 refreshMemory 早于本后台任务
+            # 完成（实测沉淀在定稿消息后约 12s 才落盘），面板停在"暂无沉淀"直到下次刷新
+            # 页面（2026-09-23 e2e 实测竞态）。
+            target = _route_ws(sess, ws)
+            if target is not None:
+                await _send(target, {"type": "memory"}, sess)
     except Exception as e:  # noqa: BLE001 — 双保险（capture 自身已兜底）
         AUDIT.output("Gateway", f"偏好沉淀任务异常（{type(e).__name__}: {e}）")
 
@@ -428,7 +456,7 @@ async def _handle_team_event(ws: WebSocket, sess: Session, item) -> None:
                                           "total_price": data.total_price}, sess)
         await _send(_route_ws(sess, ws), {"type": "usage", "usage": usage_summary(sess.runner._usage_baseline)})  # 定稿即刷新消耗条
         if sess.username:
-            asyncio.create_task(_capture_memory(sess))
+            asyncio.create_task(_capture_memory(sess, ws))
         reply = await sess.relay_team_event(
             "规划团队已完成定稿（黑板 final 分区：PDF + 推荐订单清单）。请读取后向用户转述成果要点，"
             "提醒逐项确认订单并自行在官方渠道支付。")
