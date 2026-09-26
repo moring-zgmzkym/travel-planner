@@ -128,7 +128,7 @@ class RouteConfig:
 class ServerConfig:
     HOST: str = _env("HOST", "127.0.0.1")
     PORT: int = int(_env("PORT", "8000"))
-    HEARTBEAT_S: float = 30.0          # 团队运行心跳间隔（§6 状态推送）：长任务静默期维持徽章/时间线可视状态（前端 WS ping 见 app.js 的 25s 定时）
+    HEARTBEAT_S: float = 30.0          # 团队运行心跳间隔（§6 状态推送）：长任务静默期维持徽章/时间线可视状态（前端 WS ping 见 web/src/composables/useSocket.ts 的 25s 定时）
     STATUS_REPLAY: int = 80            # 断线重连补发的最近状态条数（风险 #7）
 
 
